@@ -1,4 +1,4 @@
-"""Test dell'agent PC (python -m unittest discover -s tests -v, dalla root del progetto)."""
+"""Test dell'agent PC (python -m unittest discover -s tests -v, dalla cartella agent/)."""
 import copy
 import os
 import shutil

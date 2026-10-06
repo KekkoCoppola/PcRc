@@ -3,11 +3,11 @@
 1. Scontorna la foto (sfondo bianco da studio) -> WebP con trasparenza.
 2. Ripulisce l'alone bianco sui bordi (decontaminazione colore).
 3. Misura la striscia LED a "L" e stampa le costanti normalizzate per
-   `PcLedGeometry` in PcRc/lib/widgets/pc_led_painter.dart.
+   `PcLedGeometry` in app/lib/widgets/pc_led_painter.dart.
 
 Uso:  python tools/prepare_pc_asset.py
 Input:  tools/pc_case_source.jpg
-Output: PcRc/assets/images/pc_case.webp
+Output: app/assets/images/pc_case.webp
 """
 
 from pathlib import Path
@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "tools" / "pc_case_source.jpg"
-OUT = ROOT / "PcRc" / "assets" / "images" / "pc_case.webp"
+OUT = ROOT / "app" / "assets" / "images" / "pc_case.webp"
 
 BG_LUM_MIN = 215      # sopra questa luminanza un pixel puo' essere sfondo
 BG_SAT_MAX = 30       # ... se anche poco saturo

@@ -6,7 +6,7 @@ centra su un quadrato trasparente.
 
 Uso:  python tools/render_app_icons.py
 Input:  tools/icons/{claude,antigravity}.svg
-Output: PcRc/assets/icons/{claude,antigravity}.png (192x192 RGBA)
+Output: app/assets/icons/{claude,antigravity}.png (192x192 RGBA)
 """
 
 import subprocess
@@ -17,7 +17,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "tools" / "icons"
-OUT_DIR = ROOT / "PcRc" / "assets" / "icons"
+OUT_DIR = ROOT / "app" / "assets" / "icons"
 
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 RENDER_PX = 512

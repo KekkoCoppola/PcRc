@@ -4,7 +4,7 @@
     {
       "name": "pcrc-web",
       "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "cd /d D:\\PROGETTI\\RCPC\\PcRc && C:\\Users\\franc\\flutter\\bin\\flutter.bat run -d web-server --release --web-port 8686 --web-hostname localhost"],
+      "runtimeArgs": ["/c", "cd /d D:\\PROGETTI\\PcRc\\app && C:\\Users\\franc\\flutter\\bin\\flutter.bat run -d web-server --release --web-port 8686 --web-hostname localhost --dart-define-from-file=..\\secrets.json"],
       "port": 8686
     }
   ]
