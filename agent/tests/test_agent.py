@@ -142,11 +142,15 @@ class FakeShutdown:
 FAKE_APPS = {"claude": {"name": "claude"}, "antigravity": {"name": "antigravity"}}
 
 
-def make_agent(db, execute, running=(), shutdown=None):
+FIRST_SINCE = 1_789_990_000  # inizio dello stato visto alla prima occhiata (finto)
+
+
+def make_agent(db, execute, running=(), shutdown=None, now=lambda: NOW_MS / 1000):
     return agent.Agent(
         apps=FAKE_APPS, read_root=db.read_root, write=db.write, execute=execute,
         shutdown=shutdown or FakeShutdown(),
-        is_running=lambda cfg: cfg["name"] in running, now=lambda: NOW_MS / 1000,
+        is_running=lambda cfg: cfg["name"] in running,
+        first_since=lambda cfg, running: FIRST_SINCE, now=now,
     )
 
 
@@ -475,6 +479,63 @@ class PcCommandTest(unittest.TestCase):
 
         self.assertEqual(db.get("pc/result")["status"], "SCARTATO")
         self.assertEqual(shutdown.calls, 0)
+
+
+class StateSinceTest(unittest.TestCase):
+    def test_first_look_publishes_the_real_start_of_the_state(self):
+        db = FakeDb({})
+        a = make_agent(db, FakeExecutor(), running={"claude"})
+
+        a.tick()
+
+        self.assertEqual(db.get("apps/claude/since"), FIRST_SINCE)
+        self.assertEqual(db.get("apps/antigravity/since"), FIRST_SINCE)
+
+    def test_state_change_restarts_the_count_and_then_holds(self):
+        running = set()
+        clock = [NOW_MS / 1000]
+        db = FakeDb({})
+        a = make_agent(db, FakeExecutor(), running=running, now=lambda: clock[0])
+
+        a.tick()
+        clock[0] += 30
+        running.add("antigravity")  # aperta a mano o da un comando START
+        a.tick()
+        clock[0] += 30
+        a.tick()
+
+        self.assertEqual(db.get("apps/antigravity/since"), NOW_MS // 1000 + 30)
+        self.assertEqual(db.get("apps/claude/since"), FIRST_SINCE)
+
+    def test_agent_restart_keeps_the_published_start_of_a_closed_app(self):
+        closed_at = NOW_MS // 1000 - 600
+        db = FakeDb({"antigravity": {"actual_state": "STOPPED", "since": closed_at},
+                     "claude": {"actual_state": "RUNNING", "since": closed_at}})
+        a = make_agent(db, FakeExecutor())  # entrambe chiuse adesso
+
+        a.tick()
+
+        self.assertEqual(db.get("apps/antigravity/since"), closed_at)
+        # Claude era aperta e ora è chiusa: il cambio è avvenuto ad agent spento
+        self.assertEqual(db.get("apps/claude/since"), FIRST_SINCE)
+
+
+class StateStartedAtTest(unittest.TestCase):
+    def test_running_app_counts_from_its_process_start(self):
+        dummy = dummy_exe(self, "pcrc_dummy_since.exe")
+        before = time.time()
+        popen = subprocess.Popen([str(dummy), *DUMMY_ARGS], creationflags=subprocess.CREATE_NO_WINDOW)
+        self.addCleanup(kill_quietly, popen)
+
+        since = agent.state_started_at(app_cfg([str(dummy)], dummy.name), True)
+
+        self.assertGreaterEqual(since, int(before) - 1)
+        self.assertLessEqual(since, time.time())
+
+    def test_stopped_app_counts_from_pc_boot(self):
+        cfg = app_cfg(["x.exe"], "pcrc_mai_visto.exe")
+
+        self.assertEqual(agent.state_started_at(cfg, False), int(psutil.boot_time()))
 
 
 class ShutdownPcTest(unittest.TestCase):

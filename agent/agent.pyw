@@ -130,6 +130,22 @@ def is_running(cfg):
     """Controlla se l'applicazione configurata è attiva"""
     return bool(find_processes(cfg["process_names"], cfg["running_path_contains"]))
 
+def state_started_at(cfg, running):
+    """Da quando l'app è nello stato attuale, la prima volta che l'agent la guarda (secondi epoch).
+
+    Aperta: avvio del suo processo più vecchio. Chiusa: accensione del PC.
+    """
+    if running:
+        times = []
+        for proc in find_processes(cfg["process_names"], cfg["running_path_contains"]):
+            try:
+                times.append(proc.create_time())
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if times:
+            return int(min(times))
+    return int(psutil.boot_time())
+
 def launch_detached(args):
     """Avvia un programma senza attenderne la fine.
 
@@ -216,7 +232,7 @@ class Agent:
     (SHUTDOWN); l'esito va nel result accanto, con lo stesso id."""
 
     def __init__(self, apps, read_root, write, execute, shutdown=shutdown_pc,
-                 is_running=is_running, now=time.time):
+                 is_running=is_running, first_since=state_started_at, now=time.time):
         self.apps = apps
         self.read_root = read_root      # () -> contenuto della radice del database
         self.write = write              # {percorso: valore} -> update multi-percorso
@@ -229,6 +245,8 @@ class Agent:
         self.jobs = {}                  # nodo -> thread del comando in esecuzione
         self.finished = queue.Queue()   # (nodo, esito) prodotti dai thread
         self.online = None              # esito dell'ultimo giro, per loggare solo i cambi
+        self.first_since = first_since  # (cfg, running) -> inizio dello stato alla prima occhiata
+        self.states = {}                # app -> (running, secondi epoch di inizio dello stato)
 
     def tick(self):
         """Un giro di lavoro. Non solleva mai: se Firebase non risponde riprova al giro dopo."""
@@ -245,6 +263,8 @@ class Agent:
                                lambda action, cfg=cfg: self.execute(action, cfg))
                 running = self.is_running(cfg)
                 self.pending[f"apps/{key}/actual_state"] = "RUNNING" if running else "STOPPED"
+                self.pending[f"apps/{key}/since"] = self._state_since(
+                    key, cfg, running, apps_node.get(key))
             self._dispatch("pc", root.get("pc"), PC_ACTIONS, lambda action: self.shutdown())
             self.pending["pc_status/online"] = True
             self.pending["pc_status/last_seen"] = int(self.now())
@@ -258,6 +278,27 @@ class Agent:
             if self.online is False:
                 log.info("Connessione a Firebase ripristinata")
             self.online = True
+
+    def _state_since(self, key, cfg, running, node):
+        """Secondi epoch dall'ultimo cambio di stato dell'app (aperta/chiusa).
+
+        Al primo giro un'app chiusa riprende il since già pubblicato se lo stato
+        coincide: un riavvio dell'agent non azzera il conteggio. Per un'app aperta
+        fa fede l'avvio del processo.
+        """
+        previous = self.states.get(key)
+        if previous is None:
+            node = node if isinstance(node, dict) else {}
+            published = node.get("since")
+            if (not running and node.get("actual_state") == "STOPPED"
+                    and isinstance(published, int) and published <= self.now()):
+                since = published
+            else:
+                since = self.first_since(cfg, running)
+            self.states[key] = (running, since)
+        elif previous[0] != running:
+            self.states[key] = (running, int(self.now()))
+        return self.states[key][1]
 
     def _dispatch(self, path, node, actions, run):
         """Prende in carico il comando nuovo del nodo `path`; run(azione) lo esegue."""
