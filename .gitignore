@@ -1,0 +1,18 @@
+# Segreti: mai nel repo (modelli in secrets.example.json)
+secrets.json
+firebase_key.json
+
+# Python
+__pycache__/
+*.pyc
+*.log
+*.log.*
+
+# APK pronti da installare (scripts/build_apk.ps1)
+dist/
+
+# Sysinternals Autologon: binari di terze parti, si scaricano da Microsoft
+Autologon*.exe
+
+# Impostazioni locali di Claude Code
+.claude/settings.local.json
