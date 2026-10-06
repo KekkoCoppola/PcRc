@@ -1,12 +1,10 @@
 @echo off
-title Accensione PC via Home Assistant
-echo Invio comando di accensione a Home Assistant...
-
-powershell -NoProfile -Command ^
-  "$token = '<HA_TOKEN: vedi secrets.json>';" ^
-  "$headers = @{ 'Authorization' = 'Bearer ' + $token; 'Content-Type' = 'application/json' };" ^
-  "$body = '{\"entity_id\": \"switch.computer_presa_1\"}';" ^
-  "try { $res = Invoke-RestMethod -Uri 'https://casacoppola.top/api/services/switch/turn_off' -Method Post -Headers $headers -Body $body; Write-Host 'ESITO: Presa accesa con successo!' -ForegroundColor Green; $res | Format-List } catch { Write-Host 'ERRORE:' $_.Exception.Message -ForegroundColor Red }"
-
+title Stacco presa PC via Home Assistant
+echo ATTENZIONE: stacca la presa e toglie corrente al PC di colpo.
+echo Per spegnere in sicurezza usa SPEGNI PC nell'app: spegne Windows, poi stacca la presa.
+echo.
+choice /C SN /M "Staccare comunque la presa"
+if errorlevel 2 exit /b
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0presa.ps1" off
 echo.
 pause

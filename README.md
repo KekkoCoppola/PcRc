@@ -1,0 +1,83 @@
+# PcRc
+
+Controllo remoto del PC dal telefono: accensione tramite la presa smart di Home Assistant, avvio e chiusura di Claude e Antigravity, spegnimento sicuro.
+
+## Come funziona
+
+```
+ App Flutter (telefono)
+   │                      │
+   │ REST                 │ REST (token)
+   ▼                      ▼
+ Firebase Realtime DB   Home Assistant ── presa smart ── alimentazione PC
+   ▲
+   │ ogni 2 s: legge i comandi, scrive stato e heartbeat
+ agent.pyw (sul PC, avviato all'accesso)
+```
+
+- **Accensione.** L'app accende la presa via Home Assistant e il PC parte al ritorno della corrente. L'app aspetta il primo heartbeat dell'agent, fino a 3 minuti. Se la presa era già accesa (dopo uno spegnimento da Windows), chiede conferma e poi la spegne e la riaccende.
+- **App.** L'app scrive `apps/<app>/command`; l'agent esegue START o STOP e pubblica l'esito in `apps/<app>/result`.
+- **Spegnimento.** L'app scrive `pc/command` con SHUTDOWN e l'agent esegue `shutdown /s /t 10`. Quando l'heartbeat sparisce l'app aspetta altri 60 s, poi stacca la presa.
+
+### Nodi Firebase
+
+| Nodo | Chi scrive | Contenuto |
+|---|---|---|
+| `pc_status` | agent | `online`, `last_seen` (secondi epoch) |
+| `apps/<app>/command` | app | `{id, action: START\|STOP, ts}` |
+| `apps/<app>/result` | agent | `{id, action, status: IN_CORSO\|OK\|ERRORE\|SCARTATO, message, ts}` |
+| `apps/<app>/actual_state` | agent | `RUNNING` / `STOPPED` |
+| `pc/command`, `pc/result` | app / agent | come sopra, con `action: SHUTDOWN` |
+
+L'agent scarta i comandi più vecchi di 120 s: un comando rimasto in sospeso a PC spento non viene eseguito al boot successivo.
+
+## Struttura
+
+```
+app/        App Flutter (Android, iOS, web, desktop)
+agent/      agent.pyw, test, requirements.txt, firebase_key.json (non nel repo)
+scripts/    build_apk.ps1, install_agent.ps1, presa.ps1, accendiPC.bat, spegniPC.bat
+tools/      script per gli asset (foto del case, icone) e Sysinternals Autologon
+dist/       APK pronti da installare (non nel repo)
+secrets.json  indirizzi e token (non nel repo, modello: secrets.example.json)
+```
+
+## Setup
+
+1. Copia `secrets.example.json` in `secrets.json` e inserisci il token a lunga durata di Home Assistant.
+2. Metti la chiave dell'account di servizio Firebase in `agent/firebase_key.json`.
+3. Sul PC installa l'agent. Lo script installa le dipendenze, crea il collegamento "PcRc agent" in Esecuzione automatica e lo avvia:
+
+   ```bash
+   powershell -ExecutionPolicy Bypass -File scripts/install_agent.ps1
+   ```
+
+   Va rilanciato se sposti o rinomini la cartella del progetto. Il log è in `agent/agent.log`.
+
+Perché l'agent parta anche dopo un'accensione da remoto serve l'accesso automatico a Windows (`tools/autologon`, Sysinternals Autologon).
+
+## Build dell'APK
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/build_apk.ps1
+```
+
+L'APK per i telefoni a 64 bit finisce in `dist/PcRc-<versione>-arm64-v8a.apk`. Una build fatta senza `--dart-define-from-file=../secrets.json` mostra "CONFIGURAZIONE MANCANTE" e non comanda niente.
+
+## Test
+
+```bash
+cd agent && python -m unittest discover -s tests -v
+```
+
+```bash
+cd app && flutter analyze && flutter test
+```
+
+I test non spengono mai il PC e non toccano la presa: SHUTDOWN e Home Assistant sono simulati.
+
+## Sicurezza: limiti noti
+
+- Il Realtime Database non ha autenticazione: chi conosce l'URL può leggere lo stato e mandare comandi.
+- Il token di Home Assistant è compilato dentro l'APK: chi ha l'APK può estrarlo. Non condividere l'APK.
+- `secrets.json` e `firebase_key.json` sono esclusi dal repo tramite `.gitignore`.
