@@ -47,13 +47,19 @@ COMMAND_TTL_S = 120
 CLOSE_TIMEOUT_S = 15
 # Secondi entro cui un'app avviata deve comparire tra i processi
 START_TIMEOUT_S = 30
+# Secondi tra il comando SHUTDOWN e lo spegnimento di Windows: bastano all'agent
+# per pubblicare l'esito prima di essere chiuso
+SHUTDOWN_DELAY_S = 10
+# Azioni ammesse per le app (apps/<app>/command) e per il PC (pc/command)
+APP_ACTIONS = ("START", "STOP")
+PC_ACTIONS = ("SHUTDOWN",)
 # Nome del mutex che impedisce di avere due agent attivi insieme
-MUTEX_NAME = r"Local\RCPC_agent"
+MUTEX_NAME = r"Local\PcRc_agent"
 # File di log (pythonw non mostra errori a schermo)
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
 # ==================================================
 
-log = logging.getLogger("rcpc")
+log = logging.getLogger("pcrc")
 log.addHandler(logging.NullHandler())
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -77,8 +83,8 @@ def release_single_instance(handle):
     if handle:
         _kernel32.CloseHandle(handle)
 
-def new_command(node, now_ms, ttl_s):
-    """Comando del nodo app non ancora gestito, oppure None.
+def new_command(node, now_ms, ttl_s, actions=APP_ACTIONS):
+    """Comando del nodo (app o PC) non ancora gestito, oppure None.
 
     Il comando è "gestito" quando result.id coincide con command.id.
     Ritorna {"id", "action", "error"}: error è None se va eseguito,
@@ -96,7 +102,7 @@ def new_command(node, now_ms, ttl_s):
     action = cmd.get("action")
     ts = cmd.get("ts")
     error = None
-    if action not in ("START", "STOP"):
+    if action not in actions:
         error = f"azione non valida: {action}"
     elif not isinstance(ts, (int, float)):
         error = "comando senza timestamp"
@@ -187,39 +193,59 @@ def execute_command(action, cfg):
         return stop_processes(find_processes(cfg["process_names"]), CLOSE_TIMEOUT_S)
     raise ValueError(f"azione sconosciuta: {action}")
 
+def shutdown_pc(delay_s=SHUTDOWN_DELAY_S):
+    """Programma lo spegnimento di Windows tra delay_s secondi. Ritorna (status, messaggio)."""
+    proc = subprocess.run(
+        ["shutdown", "/s", "/t", str(delay_s), "/c", "PcRc: spegnimento remoto"],
+        capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or f"codice {proc.returncode}"
+        return "ERRORE", f"shutdown rifiutato: {detail}"
+    return "OK", f"spegnimento tra {delay_s}s"
+
 def command_result(cmd, status, message):
-    """Esito da pubblicare in apps/<app>/result (ts assegnato dal server Firebase)"""
+    """Esito da pubblicare in <nodo>/result (ts assegnato dal server Firebase)"""
     return {"id": cmd["id"], "action": cmd["action"], "status": status,
             "message": message, "ts": {".sv": "timestamp"}}
 
 class Agent:
     """Un giro ogni LOOP_INTERVAL_S: legge i comandi, li esegue in background e
-    pubblica esiti, stato delle app e heartbeat con una sola scrittura."""
+    pubblica esiti, stato delle app e heartbeat con una sola scrittura.
 
-    def __init__(self, apps, read_apps, write, execute, is_running=is_running, now=time.time):
+    I comandi arrivano in apps/<app>/command (START/STOP) e in pc/command
+    (SHUTDOWN); l'esito va nel result accanto, con lo stesso id."""
+
+    def __init__(self, apps, read_root, write, execute, shutdown=shutdown_pc,
+                 is_running=is_running, now=time.time):
         self.apps = apps
-        self.read_apps = read_apps      # () -> contenuto del nodo "apps"
+        self.read_root = read_root      # () -> contenuto della radice del database
         self.write = write              # {percorso: valore} -> update multi-percorso
         self.execute = execute          # (azione, cfg) -> (status, messaggio)
+        self.shutdown = shutdown        # () -> (status, messaggio)
         self.is_running = is_running
         self.now = now
         self.pending = {}               # scritture non ancora riuscite
-        self.dispatched = {}            # app -> id dell'ultimo comando preso in carico
-        self.jobs = {}                  # app -> thread del comando in esecuzione
-        self.finished = queue.Queue()   # (app, esito) prodotti dai thread
+        self.dispatched = {}            # nodo -> id dell'ultimo comando preso in carico
+        self.jobs = {}                  # nodo -> thread del comando in esecuzione
+        self.finished = queue.Queue()   # (nodo, esito) prodotti dai thread
         self.online = None              # esito dell'ultimo giro, per loggare solo i cambi
 
     def tick(self):
         """Un giro di lavoro. Non solleva mai: se Firebase non risponde riprova al giro dopo."""
         try:
-            apps_node = self.read_apps() or {}
+            root = self.read_root()
+            root = root if isinstance(root, dict) else {}
+            apps_node = root.get("apps")
+            apps_node = apps_node if isinstance(apps_node, dict) else {}
             while not self.finished.empty():
-                key, result = self.finished.get_nowait()
-                self.pending[f"apps/{key}/result"] = result
+                path, result = self.finished.get_nowait()
+                self.pending[f"{path}/result"] = result
             for key, cfg in self.apps.items():
-                self._dispatch(key, cfg, apps_node.get(key))
+                self._dispatch(f"apps/{key}", apps_node.get(key), APP_ACTIONS,
+                               lambda action, cfg=cfg: self.execute(action, cfg))
                 running = self.is_running(cfg)
                 self.pending[f"apps/{key}/actual_state"] = "RUNNING" if running else "STOPPED"
+            self._dispatch("pc", root.get("pc"), PC_ACTIONS, lambda action: self.shutdown())
             self.pending["pc_status/online"] = True
             self.pending["pc_status/last_seen"] = int(self.now())
             self.write(dict(self.pending))
@@ -233,32 +259,33 @@ class Agent:
                 log.info("Connessione a Firebase ripristinata")
             self.online = True
 
-    def _dispatch(self, key, cfg, node):
-        cmd = new_command(node, self.now() * 1000, COMMAND_TTL_S)
-        if cmd is None or self.dispatched.get(key) == cmd["id"]:
+    def _dispatch(self, path, node, actions, run):
+        """Prende in carico il comando nuovo del nodo `path`; run(azione) lo esegue."""
+        cmd = new_command(node, self.now() * 1000, COMMAND_TTL_S, actions)
+        if cmd is None or self.dispatched.get(path) == cmd["id"]:
             return
-        job = self.jobs.get(key)
+        job = self.jobs.get(path)
         if job is not None and job.is_alive():
             return  # resta in attesa: parte quando finisce il comando in corso
-        self.dispatched[key] = cmd["id"]
+        self.dispatched[path] = cmd["id"]
         if cmd["error"]:
-            log.info("%s: comando %s scartato (%s)", key, cmd["id"], cmd["error"])
-            self.pending[f"apps/{key}/result"] = command_result(cmd, "SCARTATO", cmd["error"])
+            log.info("%s: comando %s scartato (%s)", path, cmd["id"], cmd["error"])
+            self.pending[f"{path}/result"] = command_result(cmd, "SCARTATO", cmd["error"])
             return
-        log.info("%s: eseguo %s (comando %s)", key, cmd["action"], cmd["id"])
-        self.pending[f"apps/{key}/result"] = command_result(cmd, "IN_CORSO", "")
-        job = threading.Thread(target=self._run, args=(key, cfg, cmd), daemon=True)
-        self.jobs[key] = job
+        log.info("%s: eseguo %s (comando %s)", path, cmd["action"], cmd["id"])
+        self.pending[f"{path}/result"] = command_result(cmd, "IN_CORSO", "")
+        job = threading.Thread(target=self._run, args=(path, run, cmd), daemon=True)
+        self.jobs[path] = job
         job.start()
 
-    def _run(self, key, cfg, cmd):
+    def _run(self, path, run, cmd):
         try:
-            status, message = self.execute(cmd["action"], cfg)
+            status, message = run(cmd["action"])
         except Exception as e:
-            log.exception("%s: errore eseguendo %s", key, cmd["action"])
+            log.exception("%s: errore eseguendo %s", path, cmd["action"])
             status, message = "ERRORE", f"errore interno: {e}"
-        log.info("%s: %s -> %s (%s)", key, cmd["action"], status, message)
-        self.finished.put((key, command_result(cmd, status, message)))
+        log.info("%s: %s -> %s (%s)", path, cmd["action"], status, message)
+        self.finished.put((path, command_result(cmd, status, message)))
 
 def setup_logging():
     """pythonw non ha console: il log va in agent.log, accanto allo script"""
@@ -289,7 +316,7 @@ def main():
     # può morire in silenzio (rete che cade, sospensione) lasciando il PC sordo.
     agent = Agent(
         apps=APPS_CONFIG,
-        read_apps=lambda: db.reference("apps").get(),
+        read_root=lambda: db.reference().get(),
         write=lambda updates: db.reference().update(updates),
         execute=execute_command,
     )

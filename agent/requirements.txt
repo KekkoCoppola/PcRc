@@ -1,0 +1,2 @@
+firebase-admin>=7.6
+psutil>=7.2

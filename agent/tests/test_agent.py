@@ -22,7 +22,7 @@ TTL_S = 120
 # Finestra vera: si chiude da sola quando riceve WM_CLOSE (come premere la X).
 TK_WINDOW = (
     "import tkinter as tk\n"
-    "root = tk.Tk(); root.title('RCPC test'); root.update()\n"
+    "root = tk.Tk(); root.title('PcRc test'); root.update()\n"
     "print('ready', flush=True)\n"
     "root.mainloop()\n"
 )
@@ -58,7 +58,7 @@ def kill_by_name(name):
 
 
 def temp_dir(test):
-    path = Path(tempfile.mkdtemp(prefix="rcpc_test_"))
+    path = Path(tempfile.mkdtemp(prefix="pcrc_test_"))
     test.addCleanup(shutil.rmtree, path, ignore_errors=True)
     return path
 
@@ -79,18 +79,20 @@ def app_cfg(launch, name):
 
 
 class FakeDb:
-    """Radice del Realtime Database in memoria: legge "apps", applica update multi-percorso."""
+    """Radice del Realtime Database in memoria: legge tutto, applica update multi-percorso."""
 
-    def __init__(self, apps):
+    def __init__(self, apps, pc=None):
         self.root = {"apps": apps}
+        if pc is not None:
+            self.root["pc"] = pc
         self.fail_reads = 0
         self.fail_writes = 0
 
-    def read_apps(self):
+    def read_root(self):
         if self.fail_reads:
             self.fail_reads -= 1
             raise ConnectionError("rete assente")
-        return copy.deepcopy(self.root.get("apps"))
+        return copy.deepcopy(self.root)
 
     def write(self, updates):
         if self.fail_writes:
@@ -125,12 +127,25 @@ class FakeExecutor:
         return self.result
 
 
+class FakeShutdown:
+    """Al posto di shutdown_pc: nei test il PC non si spegne mai davvero."""
+
+    def __init__(self, result=("OK", "spegnimento tra 10s")):
+        self.calls = 0
+        self.result = result
+
+    def __call__(self):
+        self.calls += 1
+        return self.result
+
+
 FAKE_APPS = {"claude": {"name": "claude"}, "antigravity": {"name": "antigravity"}}
 
 
-def make_agent(db, execute, running=()):
+def make_agent(db, execute, running=(), shutdown=None):
     return agent.Agent(
-        apps=FAKE_APPS, read_apps=db.read_apps, write=db.write, execute=execute,
+        apps=FAKE_APPS, read_root=db.read_root, write=db.write, execute=execute,
+        shutdown=shutdown or FakeShutdown(),
         is_running=lambda cfg: cfg["name"] in running, now=lambda: NOW_MS / 1000,
     )
 
@@ -139,16 +154,16 @@ def command(cmd_id, action, age_s=0):
     return {"id": cmd_id, "action": action, "ts": NOW_MS - age_s * 1000}
 
 
-def tick_until_result(test, a, db, app, predicate, timeout_s=5):
-    """Esegue giri dell'agent finché l'esito pubblicato per `app` soddisfa predicate."""
+def tick_until_result(test, a, db, node, predicate, timeout_s=5):
+    """Esegue giri dell'agent finché l'esito pubblicato in `node` soddisfa predicate."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         a.tick()
-        result = db.get(f"apps/{app}/result")
+        result = db.get(f"{node}/result")
         if result and predicate(result):
             return result
         time.sleep(0.02)
-    test.fail(f"esito atteso mai pubblicato, ultimo: {db.get(f'apps/{app}/result')}")
+    test.fail(f"esito atteso mai pubblicato, ultimo: {db.get(f'{node}/result')}")
 
 
 def is_final(result):
@@ -241,7 +256,7 @@ class StopProcessesTest(unittest.TestCase):
 
 class StartAppTest(unittest.TestCase):
     def test_launches_app_and_waits_until_it_runs(self):
-        dummy = dummy_exe(self, "rcpc_dummy.exe")
+        dummy = dummy_exe(self, "pcrc_dummy.exe")
 
         cfg = app_cfg([str(dummy), *DUMMY_ARGS], dummy.name)
         status, _ = agent.start_app(cfg, timeout_s=10)
@@ -255,7 +270,7 @@ class StartAppTest(unittest.TestCase):
 
     def test_process_that_never_appears_is_an_error(self):
         # Il comando parte ma il processo atteso non compare (es. AppID sbagliato).
-        cfg = app_cfg([sys.executable, "-c", "pass"], "rcpc_mai_visto.exe")
+        cfg = app_cfg([sys.executable, "-c", "pass"], "pcrc_mai_visto.exe")
         self.assertEqual(agent.start_app(cfg, timeout_s=1)[0], "ERRORE")
 
     def test_app_already_running_is_not_launched_again(self):
@@ -276,7 +291,7 @@ class ExecuteCommandTest(unittest.TestCase):
     def test_stop_also_closes_same_named_processes_outside_the_running_path(self):
         # Scelta utente: STOP Claude chiude app desktop *e* Claude Code,
         # che hanno lo stesso nome exe ma cartelle diverse.
-        dummy = dummy_exe(self, "rcpc_dummy_stop.exe")
+        dummy = dummy_exe(self, "pcrc_dummy_stop.exe")
         popen = subprocess.Popen([str(dummy), *DUMMY_ARGS], creationflags=subprocess.CREATE_NO_WINDOW)
         self.addCleanup(kill_quietly, popen)
         cfg = {
@@ -297,7 +312,7 @@ class ExecuteCommandTest(unittest.TestCase):
 
 class SingleInstanceTest(unittest.TestCase):
     def test_second_agent_is_refused_while_the_first_runs(self):
-        name = f"Local\\RCPC_test_{os.getpid()}"
+        name = f"Local\\PcRc_test_{os.getpid()}"
         first = agent.acquire_single_instance(name)
         self.addCleanup(agent.release_single_instance, first)
 
@@ -307,7 +322,7 @@ class SingleInstanceTest(unittest.TestCase):
         self.assertIsNone(second)
 
     def test_name_is_free_again_after_release(self):
-        name = f"Local\\RCPC_test_rel_{os.getpid()}"
+        name = f"Local\\PcRc_test_rel_{os.getpid()}"
         agent.release_single_instance(agent.acquire_single_instance(name))
 
         again = agent.acquire_single_instance(name)
@@ -322,7 +337,7 @@ class AgentTickTest(unittest.TestCase):
         executor = FakeExecutor(("OK", "avviato"))
         a = make_agent(db, executor)
 
-        result = tick_until_result(self, a, db, "antigravity", is_final)
+        result = tick_until_result(self, a, db, "apps/antigravity", is_final)
         a.tick()
         a.tick()
 
@@ -338,7 +353,7 @@ class AgentTickTest(unittest.TestCase):
         a.tick()
         in_progress = db.get("apps/antigravity/result")
         executor.release.set()
-        final = tick_until_result(self, a, db, "antigravity", is_final)
+        final = tick_until_result(self, a, db, "apps/antigravity", is_final)
 
         self.assertEqual((in_progress["id"], in_progress["status"]), ("c1", "IN_CORSO"))
         self.assertEqual((final["id"], final["status"]), ("c1", "OK"))
@@ -399,7 +414,7 @@ class AgentTickTest(unittest.TestCase):
         a.tick()
         calls_while_busy = list(executor.calls)
         executor.release.set()
-        tick_until_result(self, a, db, "antigravity", lambda r: r["id"] == "c2" and is_final(r))
+        tick_until_result(self, a, db, "apps/antigravity", lambda r: r["id"] == "c2" and is_final(r))
 
         self.assertEqual(calls_while_busy, [("STOP", "antigravity")])
         self.assertEqual(executor.calls, [("STOP", "antigravity"), ("START", "antigravity")])
@@ -411,9 +426,75 @@ class AgentTickTest(unittest.TestCase):
         db = FakeDb({"antigravity": {"command": command("c1", "START")}})
         a = make_agent(db, crashing_executor)
 
-        result = tick_until_result(self, a, db, "antigravity", is_final)
+        result = tick_until_result(self, a, db, "apps/antigravity", is_final)
 
         self.assertEqual((result["id"], result["status"]), ("c1", "ERRORE"))
+
+
+class PcCommandTest(unittest.TestCase):
+    def test_shutdown_runs_once_and_its_result_is_published_under_pc(self):
+        db = FakeDb({}, pc={"command": command("s1", "SHUTDOWN")})
+        shutdown = FakeShutdown()
+        a = make_agent(db, FakeExecutor(), shutdown=shutdown)
+
+        result = tick_until_result(self, a, db, "pc", is_final)
+        a.tick()
+        a.tick()
+
+        self.assertEqual((result["id"], result["status"]), ("s1", "OK"))
+        self.assertEqual(shutdown.calls, 1)
+
+    def test_app_action_on_pc_node_is_rejected(self):
+        db = FakeDb({}, pc={"command": command("s1", "START")})
+        shutdown = FakeShutdown()
+        a = make_agent(db, FakeExecutor(), shutdown=shutdown)
+
+        a.tick()
+
+        self.assertEqual(db.get("pc/result")["status"], "SCARTATO")
+        self.assertEqual(shutdown.calls, 0)
+
+    def test_shutdown_on_app_node_is_rejected(self):
+        db = FakeDb({"claude": {"command": command("c1", "SHUTDOWN")}})
+        executor = FakeExecutor()
+        shutdown = FakeShutdown()
+        a = make_agent(db, executor, shutdown=shutdown)
+
+        a.tick()
+
+        self.assertEqual(db.get("apps/claude/result")["status"], "SCARTATO")
+        self.assertEqual((executor.calls, shutdown.calls), ([], 0))
+
+    def test_expired_shutdown_is_not_executed(self):
+        # Es. comando rimasto su Firebase mentre il PC era spento: niente spegnimento al boot.
+        db = FakeDb({}, pc={"command": command("s1", "SHUTDOWN", age_s=600)})
+        shutdown = FakeShutdown()
+        a = make_agent(db, FakeExecutor(), shutdown=shutdown)
+
+        a.tick()
+
+        self.assertEqual(db.get("pc/result")["status"], "SCARTATO")
+        self.assertEqual(shutdown.calls, 0)
+
+
+class ShutdownPcTest(unittest.TestCase):
+    @mock.patch.object(agent.subprocess, "run")
+    def test_schedules_windows_shutdown_after_the_delay(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "", "")
+
+        status, message = agent.shutdown_pc(10)
+
+        self.assertEqual(run.call_args.args[0][:4], ["shutdown", "/s", "/t", "10"])
+        self.assertEqual((status, message), ("OK", "spegnimento tra 10s"))
+
+    @mock.patch.object(agent.subprocess, "run")
+    def test_refused_shutdown_is_an_error(self, run):
+        run.return_value = subprocess.CompletedProcess([], 1190, "", "Arresto già programmato.")
+
+        status, message = agent.shutdown_pc(10)
+
+        self.assertEqual(status, "ERRORE")
+        self.assertIn("Arresto già programmato", message)
 
 
 if __name__ == "__main__":
