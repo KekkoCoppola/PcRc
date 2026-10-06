@@ -28,6 +28,14 @@ void main() {
     expect(app.result, isNull);
   });
 
+  test('elapsed time counts from the last state change published by the agent', () {
+    final app = AppInfo.fromJson('claude', {'actual_state': 'RUNNING', 'since': 1790000000});
+    final now = DateTime.fromMillisecondsSinceEpoch((1790000000 + 125) * 1000);
+
+    expect(app.elapsedAt(now), const Duration(seconds: 125));
+    expect(AppInfo.fromJson('claude', {'actual_state': 'RUNNING'}).elapsedAt(now), isNull);
+  });
+
   test('missing node reads as stopped', () {
     expect(AppInfo.fromJson('claude', null).isRunning, isFalse);
   });

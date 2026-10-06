@@ -1,10 +1,15 @@
+import 'dart:math' as math;
+import 'dart:ui' show lerpDouble;
+
 import 'package:flutter/material.dart';
 
 import '../models/app_info.dart';
 import '../models/managed_app.dart';
-import 'sleek_outline_button.dart';
+import 'mono_switch.dart';
 
-/// Card di un'app del PC: stato pubblicato dall'agent e pulsante AVVIA/ARRESTA.
+/// Card a cartella di un'app del PC: linguetta con lo stato, tempo dall'ultimo
+/// cambio di stato, logo, nome e interruttore on/off. Nera con bordo bianco,
+/// più luminosa quando l'app è attiva.
 class AppCard extends StatelessWidget {
   const AppCard({
     super.key,
@@ -13,6 +18,7 @@ class AppCard extends StatelessWidget {
     required this.online,
     required this.busy,
     required this.onToggle,
+    this.now,
   });
 
   final ManagedApp app;
@@ -25,109 +31,275 @@ class AppCard extends StatelessWidget {
   final bool busy;
   final VoidCallback onToggle;
 
+  /// Orologio per il tempo trascorso (test); di default l'ora attuale.
+  final DateTime? now;
+
+  static const double _bodyHeight = 92;
+
   @override
   Widget build(BuildContext context) {
-    final isRunning = online && info.isRunning;
-    final stateColor = !online
-        ? const Color(0xFF475569)
-        : (isRunning ? const Color(0xFF10B981) : const Color(0xFFEF4444));
-    final actionColor = isRunning ? const Color(0xFFEF4444) : const Color(0xFF10B981);
-    final name = app.displayName.toUpperCase();
+    final active = info.isRunning;
+    final elapsed = online ? info.elapsedAt(now ?? DateTime.now()) : null;
 
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0E1015),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isRunning ? const Color(0xFF10B981).withValues(alpha: 0.35) : const Color(0xFF1F232E),
-          width: 1.1,
-        ),
-      ),
-      child: Column(
-        children: [
-          Row(
+    return TweenAnimationBuilder<double>(
+      tween: Tween(end: active ? 1 : 0),
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+      builder: (context, t, _) => CustomPaint(
+        painter: _FolderPainter(glow: t, borderAlpha: lerpDouble(0.28, 0.92, t)!),
+        child: SizedBox(
+          height: _FolderPainter.tabHeight + _bodyHeight,
+          child: Stack(
             children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: app.accent.withValues(alpha: 0.5), width: 1.2),
-                ),
-                child: Center(
-                  child: Image.asset(
-                    app.iconAsset,
-                    width: 22,
-                    height: 22,
-                    filterQuality: FilterQuality.medium,
-                  ),
-                ),
+              Positioned(
+                left: 0,
+                top: 0,
+                width: _FolderPainter.tabWidth,
+                height: _FolderPainter.tabHeight,
+                child: _StateTab(active: active, t: t),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      app.displayName,
-                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      app.subtitle,
-                      style: const TextStyle(color: Color(0xFF64748B), fontSize: 11.5),
-                    ),
-                  ],
+              if (elapsed != null)
+                Positioned(
+                  right: 6,
+                  top: 0,
+                  height: _FolderPainter.tabHeight,
+                  child: _Elapsed(text: 'da ${formatElapsed(elapsed)}', t: t),
                 ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: stateColor, width: 1.0),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(shape: BoxShape.circle, color: stateColor),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      online ? info.actualState : 'N/D',
-                      style: TextStyle(
-                        color: online ? stateColor : const Color(0xFF94A3B8),
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.4,
+              Positioned.fill(
+                top: _FolderPainter.tabHeight,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Row(
+                    children: [
+                      _LogoDiamond(app: app, t: t),
+                      const SizedBox(width: 18),
+                      Expanded(
+                        child: Text(
+                          app.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Color.lerp(const Color(0xFFA3A8B4), Colors.white, t),
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 12),
+                      MonoSwitch(
+                        value: active,
+                        busy: busy,
+                        semanticLabel: '${app.displayName} on/off',
+                        onTap: online ? onToggle : null,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          const Divider(color: Color(0xFF1A1E29), height: 1),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: SleekOutlineButton(
-              height: 44,
-              borderWidth: 1.3,
-              borderColor: actionColor,
-              textColor: actionColor,
-              isLoading: busy,
-              label: busy ? 'ATTENDI PC...' : (isRunning ? 'ARRESTA $name' : 'AVVIA $name'),
-              icon: busy ? null : Icon(isRunning ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 20),
-              onPressed: online && !busy ? onToggle : null,
+        ),
+      ),
+    );
+  }
+}
+
+/// "12s", "52m", "3h 05m", "2g 4h".
+String formatElapsed(Duration d) {
+  if (d.inMinutes < 1) return '${d.inSeconds}s';
+  if (d.inHours < 1) return '${d.inMinutes}m';
+  if (d.inDays < 1) return '${d.inHours}h ${(d.inMinutes % 60).toString().padLeft(2, '0')}m';
+  return '${d.inDays}g ${d.inHours % 24}h';
+}
+
+class _StateTab extends StatelessWidget {
+  const _StateTab({required this.active, required this.t});
+
+  final bool active;
+  final double t;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 16, right: 22),
+      child: Row(
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: t),
+              border: Border.all(color: Colors.white.withValues(alpha: lerpDouble(0.45, 1, t)!), width: 1.2),
+              boxShadow: [BoxShadow(color: Colors.white.withValues(alpha: 0.6 * t), blurRadius: 8)],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                active ? 'Attivo' : 'Inattivo',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: lerpDouble(0.55, 1, t)!),
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                ),
+              ),
             ),
           ),
         ],
       ),
     );
   }
+}
+
+class _Elapsed extends StatelessWidget {
+  const _Elapsed({required this.text, required this.t});
+
+  final String text;
+  final double t;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Colors.white.withValues(alpha: lerpDouble(0.5, 0.95, t)!);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.schedule_rounded, size: 14, color: color),
+        const SizedBox(width: 6),
+        Text(
+          text,
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Logo dell'app dentro un rombo nero bordato di bianco, come l'icona dello spunto.
+class _LogoDiamond extends StatelessWidget {
+  const _LogoDiamond({required this.app, required this.t});
+
+  final ManagedApp app;
+  final double t;
+
+  static const double _side = 44;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: _side * math.sqrt2,
+      height: _side * math.sqrt2,
+      child: Center(
+        child: Transform.rotate(
+          angle: math.pi / 4,
+          child: Container(
+            width: _side,
+            height: _side,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0B0C10),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withValues(alpha: lerpDouble(0.3, 0.85, t)!), width: 1.2),
+              boxShadow: [
+                // Unico tocco di colore: il marchio dell'app, solo quando è attiva
+                BoxShadow(color: app.accent.withValues(alpha: 0.35 * t), blurRadius: 18),
+              ],
+            ),
+            child: Transform.rotate(
+              angle: -math.pi / 4,
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Opacity(
+                  opacity: lerpDouble(0.6, 1, t)!,
+                  child: Image.asset(app.iconAsset, filterQuality: FilterQuality.medium),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sagoma a cartella: linguetta in alto a sinistra che scende con una curva a S nel corpo.
+class _FolderPainter extends CustomPainter {
+  _FolderPainter({required this.glow, required this.borderAlpha});
+
+  static const double tabWidth = 122;
+  static const double tabHeight = 34;
+  static const double _radius = 18;
+  static const double _slope = 22;
+
+  /// 0 = inattiva, 1 = attiva.
+  final double glow;
+  final double borderAlpha;
+
+  Path _shape(Size size) {
+    final w = size.width, h = size.height;
+    const r = _radius, t = tabHeight, tw = tabWidth, s = _slope;
+    const corner = Radius.circular(r);
+    return Path()
+      ..moveTo(0, r)
+      ..arcToPoint(const Offset(r, 0), radius: corner)
+      ..lineTo(tw - s, 0)
+      ..cubicTo(tw, 0, tw, t, tw + s, t)
+      ..lineTo(w - r, t)
+      ..arcToPoint(Offset(w, t + r), radius: corner)
+      ..lineTo(w, h - r)
+      ..arcToPoint(Offset(w - r, h), radius: corner)
+      ..lineTo(r, h)
+      ..arcToPoint(Offset(0, h - r), radius: corner)
+      ..close();
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = _shape(size);
+    final bounds = Offset.zero & size;
+
+    canvas.drawShadow(path, Colors.black, 10, false);
+    if (glow > 0) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 6
+          ..color = Colors.white.withValues(alpha: 0.10 * glow)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
+      );
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.lerp(const Color(0xFF101116), const Color(0xFF16171D), glow)!,
+            const Color(0xFF06070A),
+          ],
+        ).createShader(bounds),
+    );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4
+        ..color = Colors.white.withValues(alpha: borderAlpha),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _FolderPainter old) =>
+      old.glow != glow || old.borderAlpha != borderAlpha;
 }

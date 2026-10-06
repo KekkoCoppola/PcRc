@@ -386,7 +386,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         ),
         for (final app in managedApps)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
             child: AppCard(
               app: app,
               info: _pc.app(app.key),

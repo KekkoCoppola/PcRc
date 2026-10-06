@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pcrc/controllers/pc_controller.dart';
 import 'package:pcrc/main.dart';
+import 'package:pcrc/widgets/mono_switch.dart';
 import 'package:pcrc/widgets/pc_case_hero.dart';
 import 'package:pcrc/widgets/power_button_widget.dart';
 
@@ -47,6 +48,19 @@ void main() {
     expect(find.textContaining('PROTOTIPO'), findsNothing);
     expect(find.image(const AssetImage('assets/icons/claude.png')), findsOneWidget);
     expect(find.image(const AssetImage('assets/icons/antigravity.png')), findsOneWidget);
+    expect(find.text('Inattivo'), findsNWidgets(2));
+    expect(find.byType(MonoSwitch), findsNWidgets(2));
+  });
+
+  testWidgets('app switch sends START to the PC', (tester) async {
+    remote.heartbeat(DateTime.now());
+    await pumpApp(tester, size: const Size(1180, 820));
+    await tester.pump(const Duration(seconds: 1));
+
+    await tester.tap(find.byType(MonoSwitch).first);
+    await tester.pump();
+
+    expect(remote.calls, ['app:claude:START']);
   });
 
   testWidgets('power button turns the plug on and waits for the PC', (tester) async {
