@@ -1,4 +1,4 @@
-import 'app_info.dart';
+import 'command_result.dart';
 
 enum CommandOutcome { waiting, succeeded, failed, timedOut }
 
@@ -14,10 +14,10 @@ class PendingCommand {
 
   PendingCommand({required this.id, required this.action, required this.sentAt});
 
-  /// Stato del comando in base all'esito pubblicato dall'agent per [app].
-  CommandOutcome outcome(AppInfo app, DateTime now) {
-    if (app.resultId == id) {
-      switch (app.resultStatus) {
+  /// Stato del comando in base all'ultimo esito pubblicato dall'agent sul suo nodo.
+  CommandOutcome outcome(CommandResult? result, DateTime now) {
+    if (result?.id == id) {
+      switch (result!.status) {
         case 'OK':
           return CommandOutcome.succeeded;
         case 'ERRORE':

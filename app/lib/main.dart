@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'controllers/pc_controller.dart';
 import 'screens/home_screen.dart';
 
 void main() {
@@ -19,7 +20,10 @@ void main() {
 }
 
 class PcRcApp extends StatelessWidget {
-  const PcRcApp({super.key});
+  /// [controller] serve ai test; di default la home usa Firebase e Home Assistant reali.
+  const PcRcApp({super.key, this.controller});
+
+  final PcController? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -66,7 +70,7 @@ class PcRcApp extends StatelessWidget {
           behavior: SnackBarBehavior.floating,
         ),
       ),
-      home: const HomeScreen(),
+      home: HomeScreen(controller: controller),
     );
   }
 }

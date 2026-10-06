@@ -3,7 +3,7 @@ import 'package:pcrc/models/app_info.dart';
 
 void main() {
   test('reads the result the PC published for the last command', () {
-    final app = AppInfo.fromJson('antigravity', 'Antigravity 2.0', {
+    final app = AppInfo.fromJson('antigravity', {
       'actual_state': 'RUNNING',
       'command': {'id': 'c1', 'action': 'START', 'ts': 1790000000000},
       'result': {
@@ -16,15 +16,19 @@ void main() {
     });
 
     expect(app.isRunning, isTrue);
-    expect(app.resultId, 'c1');
-    expect(app.resultStatus, 'OK');
-    expect(app.resultMessage, 'avviato');
+    expect(app.result!.id, 'c1');
+    expect(app.result!.status, 'OK');
+    expect(app.result!.message, 'avviato');
   });
 
   test('app that never received a command has no result', () {
-    final app = AppInfo.fromJson('claude', 'Claude', {'actual_state': 'STOPPED'});
+    final app = AppInfo.fromJson('claude', {'actual_state': 'STOPPED'});
 
-    expect(app.resultId, isNull);
-    expect(app.resultStatus, isNull);
+    expect(app.isRunning, isFalse);
+    expect(app.result, isNull);
+  });
+
+  test('missing node reads as stopped', () {
+    expect(AppInfo.fromJson('claude', null).isRunning, isFalse);
   });
 }

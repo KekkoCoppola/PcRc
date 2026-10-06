@@ -1,82 +1,116 @@
-import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:pcrc/controllers/pc_controller.dart';
 import 'package:pcrc/main.dart';
 import 'package:pcrc/widgets/pc_case_hero.dart';
 import 'package:pcrc/widgets/power_button_widget.dart';
-import 'package:pcrc/widgets/sleek_outline_button.dart';
+
+import 'support/fake_remote.dart';
 
 void main() {
-  testWidgets('Smoke test: shows PC Spento view with centered PowerButtonWidget initially', (WidgetTester tester) async {
-    await tester.pumpWidget(const PcRcApp());
-    await tester.pump();
+  late FakeRemote remote;
 
-    // Verify PC Spento state: PC photo on top, power button below
+  setUp(() => remote = FakeRemote());
+
+  Future<void> pumpApp(WidgetTester tester, {bool configured = true, Size? size}) async {
+    if (size != null) {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+    }
+    final controller = PcController(remote, configured: configured, pollInterval: null);
+    await tester.pumpWidget(PcRcApp(controller: controller));
+    await tester.pump(); // prima lettura di Firebase
+  }
+
+  testWidgets('PC off: photo on top, power button below, no dashboard', (tester) async {
+    await pumpApp(tester);
+
     expect(find.text('PC SPENTO'), findsOneWidget);
     expect(find.byType(PcCaseHero), findsOneWidget);
     expect(find.bySemanticsLabel('PC spento'), findsOneWidget);
     expect(find.byType(PowerButtonWidget), findsOneWidget);
+    expect(find.text('Applicazioni & Processi'), findsNothing);
   });
 
-  testWidgets('Interactive test: tapping power button initiates startup and transitions to dashboard', (WidgetTester tester) async {
-    // Tablet landscape: the test font has square glyphs, so labels are much
-    // wider than with real fonts; the wide layout gives the dashboard room.
-    tester.view.physicalSize = const Size(1180, 820);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+  testWidgets('PC already on: opens on the dashboard, no prototype leftovers', (tester) async {
+    remote.heartbeat(DateTime.now());
 
-    await tester.pumpWidget(const PcRcApp());
-    await tester.pump();
+    // Tablet orizzontale: il font di test ha glifi quadrati, servono colonne larghe.
+    await pumpApp(tester, size: const Size(1180, 820));
+    await tester.pump(const Duration(seconds: 1));
 
-    // Tap the power button
-    await tester.tap(find.byType(PowerButtonWidget));
-    await tester.pump();
-
-    // Shows booting text and the PC LEDs light up immediately
-    expect(find.text('AVVIO IN CORSO...'), findsOneWidget);
-    expect(find.bySemanticsLabel('PC acceso'), findsOneWidget);
-
-    // Advance time for LED ignition and transition
-    await tester.pump(const Duration(milliseconds: 1500));
-    await tester.pump(const Duration(milliseconds: 800));
-
-    // Should now show dashboard under the (still visible) PC
-    expect(find.byType(PcCaseHero), findsOneWidget);
-    expect(find.byType(SleekOutlineButton), findsWidgets);
     expect(find.text('Applicazioni & Processi'), findsOneWidget);
+    expect(find.text('SPEGNI PC'), findsOneWidget);
+    expect(find.bySemanticsLabel('PC acceso'), findsOneWidget);
     expect(find.byType(PowerButtonWidget), findsNothing);
-
-    // No header (title/reload/SPEGNI) and no status banner: refresh is pull-down
-    expect(find.text('PC REMOTE'), findsNothing);
-    expect(find.text('SPEGNI'), findsNothing);
-    expect(find.text('PC Online'), findsNothing);
-    expect(find.byType(RefreshIndicator), findsOneWidget);
-
-    // Monitored apps use their brand icons
+    expect(find.textContaining('PROTOTIPO'), findsNothing);
     expect(find.image(const AssetImage('assets/icons/claude.png')), findsOneWidget);
     expect(find.image(const AssetImage('assets/icons/antigravity.png')), findsOneWidget);
   });
 
-  testWidgets('Tablet landscape places PC and controls side by side', (WidgetTester tester) async {
-    tester.view.physicalSize = const Size(1180, 820);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+  testWidgets('power button turns the plug on and waits for the PC', (tester) async {
+    await pumpApp(tester);
 
-    await tester.pumpWidget(const PcRcApp());
+    await tester.tap(find.byType(PowerButtonWidget));
     await tester.pump();
+
+    expect(remote.calls, ['plug?', 'plug:on']);
+    expect(find.text('AVVIO IN CORSO...'), findsOneWidget);
+    expect(find.bySemanticsLabel('PC acceso'), findsOneWidget);
+  });
+
+  testWidgets('plug already on: asks before cycling it', (tester) async {
+    remote.plugOn = true;
+    await pumpApp(tester);
+
+    await tester.tap(find.byType(PowerButtonWidget));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Presa già accesa'), findsOneWidget);
+    expect(remote.calls, ['plug?']);
+
+    await tester.tap(find.text('ANNULLA'));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(remote.calls, ['plug?']);
+    expect(find.text('PC SPENTO'), findsOneWidget);
+  });
+
+  testWidgets('SPEGNI PC asks for confirmation, then sends SHUTDOWN', (tester) async {
+    remote.heartbeat(DateTime.now());
+    await pumpApp(tester, size: const Size(1180, 820));
+    await tester.pump(const Duration(seconds: 1));
+
+    await tester.tap(find.text('SPEGNI PC'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Spegnere il PC?'), findsOneWidget);
+
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('SPEGNI PC')));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(remote.calls, ['pc:SHUTDOWN']);
+  });
+
+  testWidgets('build without secrets.json says so instead of failing silently', (tester) async {
+    await pumpApp(tester, configured: false);
+
+    expect(find.text('CONFIGURAZIONE MANCANTE'), findsOneWidget);
+    expect(remote.calls, isEmpty);
+  });
+
+  testWidgets('Tablet landscape places PC and controls side by side', (tester) async {
+    await pumpApp(tester, size: const Size(1180, 820));
 
     final hero = tester.getRect(find.byType(PcCaseHero));
     final button = tester.getRect(find.byType(PowerButtonWidget));
     expect(hero.right, lessThanOrEqualTo(button.left));
   });
 
-  testWidgets('Phone and tablet portrait stack PC above controls', (WidgetTester tester) async {
+  testWidgets('Phone and tablet portrait stack PC above controls', (tester) async {
     for (final size in const [Size(390, 844), Size(820, 1180)]) {
-      tester.view.physicalSize = size;
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.reset);
-
-      await tester.pumpWidget(const PcRcApp());
-      await tester.pump();
+      await pumpApp(tester, size: size);
 
       final hero = tester.getRect(find.byType(PcCaseHero));
       final button = tester.getRect(find.byType(PowerButtonWidget));

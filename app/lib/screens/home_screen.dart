@@ -1,163 +1,133 @@
 import 'dart:async';
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
-import '../models/app_info.dart';
-import '../models/pc_status.dart';
-import '../models/pending_command.dart';
+
+import '../config/app_config.dart';
+import '../controllers/pc_controller.dart';
+import '../models/managed_app.dart';
 import '../services/remote_control_service.dart';
 import '../widgets/ambient_background.dart';
+import '../widgets/app_card.dart';
+import '../widgets/off_controls.dart';
 import '../widgets/pc_case_hero.dart';
-import '../widgets/power_button_widget.dart';
+import '../widgets/power_card.dart';
 import '../widgets/sleek_outline_button.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  /// [controller] serve ai test; di default parla con Firebase e Home Assistant
+  /// usando la configurazione di secrets.json.
+  const HomeScreen({super.key, this.controller});
+
+  final PcController? controller;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
-  final RemoteControlService _service = RemoteControlService();
+  late final PcController _pc;
+  late final StreamSubscription<PcMessage> _messages;
+  bool _refreshing = false;
 
-  PcStatus _pcStatus = PcStatus(fetchTime: DateTime.now());
-  Map<String, AppInfo> _apps = {
-    'claude': AppInfo(key: 'claude', displayName: 'Claude', actualState: 'STOPPED'),
-    'antigravity':
-        AppInfo(key: 'antigravity', displayName: 'Antigravity 2.0', actualState: 'STOPPED'),
-  };
-
-  // State flags
-  final bool _isTurningOffPc = false;
-  bool _isBooting = false;
-  bool _isRefreshing = false;
-  Timer? _pollingTimer;
-
-  // Visual prototype mode: strictly visual, starts on PC Spento, no real shutdowns or process killing
-  bool _simulatedOnline = false;
-
-  bool get _isEffectiveOnline => _simulatedOnline;
-
-  // Commands in flight per app (visual simulation)
-  final Map<String, PendingCommand> _pending = {};
-  final Set<String> _sending = {};
-  bool _isBusy(String appKey) => _pending.containsKey(appKey) || _sending.contains(appKey);
-
-  // Transition controller between PC Off (0.0) and PC On (1.0)
-  late AnimationController _transitionController;
-  late Animation<double> _fadeOffScreen;
-  late Animation<double> _scaleOffScreen;
-  late Animation<double> _fadeHomeScreen;
-  late Animation<Offset> _slideHomeScreen;
-
+  // Transizione tra controlli da spento (0.0) e dashboard da acceso (1.0)
+  late final AnimationController _transition;
+  late final Animation<double> _fadeOffScreen;
+  late final Animation<double> _scaleOffScreen;
+  late final Animation<double> _fadeHomeScreen;
+  late final Animation<Offset> _slideHomeScreen;
 
   @override
   void initState() {
     super.initState();
+    _pc = widget.controller ??
+        PcController(
+          RemoteControlService(AppConfig.fromEnvironment),
+          configured: AppConfig.fromEnvironment.isComplete,
+        );
 
-    // Setup transition animations
-    _transitionController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 750),
-      value: 0.0, // Start initially at PC Off view (centered power button only)
-    );
-
+    _transition = AnimationController(vsync: this, duration: const Duration(milliseconds: 750));
     _fadeOffScreen = Tween<double>(begin: 1.0, end: 0.0).animate(
-      CurvedAnimation(
-        parent: _transitionController,
-        curve: const Interval(0.0, 0.6, curve: Curves.easeOutCubic),
-      ),
+      CurvedAnimation(parent: _transition, curve: const Interval(0.0, 0.6, curve: Curves.easeOutCubic)),
     );
-
     _scaleOffScreen = Tween<double>(begin: 1.0, end: 1.08).animate(
-      CurvedAnimation(
-        parent: _transitionController,
-        curve: const Interval(0.0, 0.7, curve: Curves.easeOutCubic),
-      ),
+      CurvedAnimation(parent: _transition, curve: const Interval(0.0, 0.7, curve: Curves.easeOutCubic)),
     );
-
     _fadeHomeScreen = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _transitionController,
-        curve: const Interval(0.35, 1.0, curve: Curves.easeOutCubic),
-      ),
+      CurvedAnimation(parent: _transition, curve: const Interval(0.35, 1.0, curve: Curves.easeOutCubic)),
+    );
+    _slideHomeScreen = Tween<Offset>(begin: const Offset(0.0, 0.05), end: Offset.zero).animate(
+      CurvedAnimation(parent: _transition, curve: const Interval(0.35, 1.0, curve: Curves.easeOutCubic)),
     );
 
-    _slideHomeScreen = Tween<Offset>(
-      begin: const Offset(0.0, 0.05),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: _transitionController,
-        curve: const Interval(0.35, 1.0, curve: Curves.easeOutCubic),
-      ),
-    );
-
-    // Only read initial display names/read-only info without changing transition state
-    _fetchDataReadOnly();
+    _pc.addListener(_onPcChanged);
+    _messages = _pc.messages.listen((m) => _showSnack(m.text, isError: m.isError));
+    _pc.start();
   }
 
   @override
   void dispose() {
-    _pollingTimer?.cancel();
-    _transitionController.dispose();
-    _service.dispose();
+    _pc.removeListener(_onPcChanged);
+    _messages.cancel();
+    _pc.dispose();
+    _transition.dispose();
     super.dispose();
   }
 
-  Future<void> _fetchDataReadOnly() async {
-    try {
-      final futures = await Future.wait([
-        _service.fetchPcStatus(),
-        _service.fetchAppsStatus(),
-      ]);
-
-      if (!mounted) return;
-
-      setState(() {
-        _pcStatus = futures[0] as PcStatus;
-        final appsMap = futures[1] as Map<String, AppInfo>;
-        _apps = {
-          for (final key in ['claude', 'antigravity'])
-            key: appsMap[key] ?? _apps[key]!,
-        };
-      });
-    } catch (_) {}
-  }
-
-  /// Click on the Power Button under the PC:
-  /// 1. Ignites the neon cyan ring and the PC's RGB LED strip
-  /// 2. Smooth fade-away of the power button and fade-in of the dashboard
-  /// 3. Visual-only preview (NO actual commands sent)
-  Future<void> _handlePowerButtonTap() async {
-    if (_isBooting) return;
-
-    setState(() {
-      _isBooting = true;
-    });
-
-    // Let the user appreciate the LED strip lighting up along the case
-    await Future.delayed(PcCaseHero.ignitionDuration);
+  void _onPcChanged() {
     if (!mounted) return;
-
-    // Transition smoothly to Home Screen
-    setState(() {
-      _simulatedOnline = true;
-    });
-
-    await _transitionController.forward();
-
-    if (mounted) {
-      setState(() {
-        _isBooting = false;
-      });
-      _showSnack('Sistema avviato con successo. Dashboard attiva.', isError: false);
+    setState(() {});
+    final status = _transition.status;
+    if (_pc.dashboardVisible) {
+      if (status != AnimationStatus.forward && status != AnimationStatus.completed) {
+        _transition.forward();
+      }
+    } else if (status != AnimationStatus.reverse && status != AnimationStatus.dismissed) {
+      _transition.reverse();
     }
   }
 
-  /// Visual-only turn off PC: smoothly transitions back to off screen with centered power button
-  Future<void> _turnOffPcWithConfirmation() async {
-    final confirm = await showDialog<bool>(
+  Future<void> _refresh() async {
+    setState(() => _refreshing = true);
+    await _pc.refresh();
+    if (mounted) setState(() => _refreshing = false);
+  }
+
+  Future<void> _onPowerTap() async {
+    final result = await _pc.powerOn();
+    if (result != PowerOnResult.needsPlugCycle || !mounted) return;
+    final cycle = await _confirm(
+      icon: Icons.power_rounded,
+      color: const Color(0xFF00E5FF),
+      title: 'Presa già accesa',
+      body: 'La presa risulta accesa ma il PC non risponde, di solito perché è stato spento '
+          'da Windows. La spengo e la riaccendo per farlo ripartire?\n\n'
+          'Se il PC fosse acceso ma senza agent, verrebbe spento di colpo.',
+      confirmLabel: 'RIAVVIA PRESA',
+    );
+    if (cycle) await _pc.powerOn(cyclePlug: true);
+  }
+
+  Future<void> _onShutdownTap() async {
+    final confirm = await _confirm(
+      icon: Icons.power_settings_new_rounded,
+      color: const Color(0xFFEF4444),
+      title: 'Spegnere il PC?',
+      body: 'Windows si spegne e chiude tutte le app. A spegnimento completato '
+          'la presa viene staccata.',
+      confirmLabel: 'SPEGNI PC',
+    );
+    if (confirm) await _pc.shutdown();
+  }
+
+  Future<bool> _confirm({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String body,
+    required String confirmLabel,
+  }) async {
+    final result = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.75),
       builder: (ctx) => AlertDialog(
@@ -167,23 +137,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           side: const BorderSide(color: Color(0xFF262B38), width: 1.2),
         ),
         title: Row(
-          children: const [
-            Icon(Icons.power_settings_new_rounded, color: Color(0xFFEF4444), size: 24),
-            SizedBox(width: 10),
-            Text(
-              'Spegnere il PC?',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+          children: [
+            Icon(icon, color: color, size: 24),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Text(
+                title,
+                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
               ),
             ),
           ],
         ),
-        content: const Text(
-          'Simulazione visiva: l\'interfaccia tornerà alla schermata iniziale con il tasto di accensione centrale.',
-          style: TextStyle(color: Color(0xFF94A3B8), fontSize: 14),
-        ),
+        content: Text(body, style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 14)),
         actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actions: [
           SleekOutlineButton(
@@ -198,74 +163,23 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           SleekOutlineButton(
             height: 40,
             borderWidth: 1.3,
-            borderColor: const Color(0xFFEF4444),
-            textColor: const Color(0xFFEF4444),
-            label: 'SPEGNI PC',
-            icon: const Icon(Icons.power_settings_new_rounded, size: 16),
+            borderColor: color,
+            textColor: color,
+            label: confirmLabel,
+            icon: Icon(icon, size: 16),
             onPressed: () => Navigator.of(ctx).pop(true),
           ),
         ],
       ),
     );
-
-    if (confirm != true || !mounted) return;
-
-    setState(() {
-      _simulatedOnline = false;
-    });
-
-    // Smooth transition back to the single power button view
-    await _transitionController.reverse();
-  }
-
-
-  /// Visual-only toggle for app state: simulates smooth state change without sending real commands
-  Future<void> _toggleAppState(String appKey) async {
-    final currentApp = _apps[appKey];
-    if (currentApp == null || _isBusy(appKey)) return;
-
-    final isCurrentlyRunning = currentApp.isRunning;
-    final newState = isCurrentlyRunning ? 'STOPPED' : 'RUNNING';
-
-    setState(() {
-      _sending.add(appKey);
-      _apps[appKey] = currentApp.copyWith(isMutating: true);
-    });
-
-    // Simulate smooth processing delay (~500ms)
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    if (!mounted) return;
-
-    setState(() {
-      _sending.remove(appKey);
-      _apps[appKey] = currentApp.copyWith(
-        actualState: newState,
-        isMutating: false,
-      );
-    });
-
-    final action = newState == 'RUNNING' ? 'avviato' : 'arrestato';
-    _showSnack('${currentApp.displayName}: processo $action (simulazione visiva)', isError: false);
-  }
-
-  Future<void> _fetchData({bool showLoader = false}) async {
-    if (showLoader && mounted) {
-      setState(() => _isRefreshing = true);
-    }
-    await _fetchDataReadOnly();
-    if (mounted) {
-      setState(() => _isRefreshing = false);
-    }
+    return result ?? false;
   }
 
   void _showSnack(String text, {required bool isError}) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-          text,
-          style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white),
-        ),
+        content: Text(text, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white)),
         backgroundColor: isError ? const Color(0xFF7F1D1D) : const Color(0xFF131722),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
@@ -275,16 +189,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             width: 1,
           ),
         ),
-        duration: Duration(seconds: isError ? 4 : 3),
+        duration: Duration(seconds: isError ? 5 : 3),
       ),
     );
   }
 
   /// Larghezza minima per affiancare PC e controlli (tablet / telefono in orizzontale).
   static const double _wideLayoutMinWidth = 720;
-
-  /// I LED partono appena arriva corrente, prima che il PC risulti online.
-  bool get _pcPoweredOn => _isBooting || _isEffectiveOnline;
 
   @override
   Widget build(BuildContext context) {
@@ -305,7 +216,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   /// Telefono e tablet in verticale: PC centrato in alto, controlli sotto.
-  /// Aggiornamento: trascinando verso il basso.
   Widget _buildColumnLayout(BoxConstraints constraints) {
     final heroHeight = math.min(
       (constraints.maxHeight * 0.42).clamp(220.0, 480.0),
@@ -317,9 +227,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.only(top: 20, bottom: 8),
-            child: Center(
-              child: PcCaseHero(poweredOn: _pcPoweredOn, height: heroHeight),
-            ),
+            child: Center(child: PcCaseHero(poweredOn: _pc.ledsOn, height: heroHeight)),
           ),
         ),
         SliverToBoxAdapter(
@@ -346,9 +254,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 math.min(constraints.maxHeight * 0.92, 640.0),
                 constraints.maxWidth / PcCaseHero.widthFor(1),
               );
-              return Center(
-                child: PcCaseHero(poweredOn: _pcPoweredOn, height: heroHeight),
-              );
+              return Center(child: PcCaseHero(poweredOn: _pc.ledsOn, height: heroHeight));
             },
           ),
         ),
@@ -371,12 +277,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
+  /// Aggiornamento trascinando verso il basso, solo con la dashboard visibile.
   Widget _buildRefreshableScroll({required List<Widget> slivers}) {
     return RefreshIndicator(
-      onRefresh: () => _fetchData(showLoader: true),
-      // Da spento non c'e' niente da aggiornare: niente pull-to-refresh.
+      onRefresh: _pc.refresh,
       notificationPredicate: (notification) =>
-          _isEffectiveOnline && defaultScrollNotificationPredicate(notification),
+          _pc.dashboardVisible && defaultScrollNotificationPredicate(notification),
       color: const Color(0xFF00E5FF),
       backgroundColor: const Color(0xFF12141C),
       child: CustomScrollView(
@@ -387,173 +293,59 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   /// Controlli sotto il PC: power button da spento, dashboard da acceso,
-  /// in dissolvenza incrociata guidata da [_transitionController].
+  /// in dissolvenza incrociata guidata da [_transition].
   Widget _buildControls(double width) {
     return Stack(
       alignment: Alignment.topCenter,
       children: [
         AnimatedBuilder(
-          animation: _transitionController,
+          animation: _transition,
           builder: (context, child) {
             final opacity = _fadeOffScreen.value;
             if (opacity <= 0.001) return const SizedBox.shrink();
-
             return IgnorePointer(
-              ignoring: _transitionController.value > 0.4,
+              ignoring: _transition.value > 0.4,
               child: Opacity(
                 opacity: opacity,
-                child: Transform.scale(
-                  scale: _scaleOffScreen.value,
-                  child: child,
-                ),
+                child: Transform.scale(scale: _scaleOffScreen.value, child: child),
               ),
             );
           },
-          child: _buildOffControls(width),
+          child: OffControls(controller: _pc, width: width, onPowerTap: _onPowerTap),
         ),
         AnimatedBuilder(
-          animation: _transitionController,
+          animation: _transition,
           builder: (context, child) {
             final opacity = _fadeHomeScreen.value;
             if (opacity <= 0.001) return const SizedBox.shrink();
-
             return IgnorePointer(
-              ignoring: _transitionController.value < 0.3,
+              ignoring: _transition.value < 0.3,
               child: Opacity(
                 opacity: opacity,
-                child: SlideTransition(
-                  position: _slideHomeScreen,
-                  child: child,
-                ),
+                child: SlideTransition(position: _slideHomeScreen, child: child),
               ),
             );
           },
-          child: _buildDashboardControls(),
+          child: _buildDashboard(),
         ),
       ],
     );
   }
 
-  /// =========================================================================
-  /// PC OFF CONTROLS (Power Button under the PC)
-  /// =========================================================================
-  Widget _buildOffControls(double width) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Photorealistic Power Button
-          PowerButtonWidget(
-            size: (width * 0.32).clamp(120.0, 170.0),
-            isOnline: _isEffectiveOnline,
-            isBooting: _isBooting,
-            onTap: _handlePowerButtonTap,
-          ),
-
-          const SizedBox(height: 16),
-
-          // Clean status title
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 300),
-            child: Text(
-              _isBooting
-                  ? 'AVVIO IN CORSO...'
-                  : 'PC SPENTO',
-              key: ValueKey<bool>(_isBooting),
-              style: TextStyle(
-                color: _isBooting ? const Color(0xFF00E5FF) : const Color(0xFFE2E8F0),
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 3.5,
-                shadows: _isBooting
-                    ? [
-                        const Shadow(
-                          color: Color(0xFF00E5FF),
-                          blurRadius: 16,
-                        )
-                      ]
-                    : null,
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          Text(
-            _isBooting
-                ? 'Invio impulso Home Assistant • Avvio in corso'
-                : 'Tocca il pulsante per accendere il PC',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Color(0xFF64748B),
-              fontSize: 13,
-              fontWeight: FontWeight.w400,
-              letterSpacing: 0.3,
-            ),
-          ),
-
-          const SizedBox(height: 18),
-
-          // Last known state info chip
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0E1015),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFF1E232E), width: 1),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.history_rounded, size: 13, color: Color(0xFF64748B)),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    'Ultimo segnale: ${_pcStatus.formattedStatus}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Color(0xFF94A3B8),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 28),
-
-          // Bottom subtle hint
-          const Text(
-            'Smart PC Controller • Powered by Home Assistant',
-            style: TextStyle(
-              color: Color(0xFF475569),
-              fontSize: 11,
-              letterSpacing: 0.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// =========================================================================
-  /// DASHBOARD CONTROLS (status, power, apps) under the PC
-  /// =========================================================================
-  Widget _buildDashboardControls() {
+  Widget _buildDashboard() {
+    final online = _pc.phase == PcPhase.online;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Power Control Section
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-          child: _buildPowerControlCard(),
+          child: PowerCard(
+            controller: _pc,
+            onShutdown: _onShutdownTap,
+            onRefresh: _refresh,
+            refreshing: _refreshing,
+          ),
         ),
-
-        // Applications Section Title
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
           child: Row(
@@ -582,7 +374,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ),
               const SizedBox(width: 12),
               Text(
-                '2 monitorati',
+                '${managedApps.length} monitorati',
                 style: TextStyle(
                   color: const Color(0xFF64748B).withValues(alpha: 0.9),
                   fontSize: 11,
@@ -592,306 +384,34 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             ],
           ),
         ),
-
-        // Claude App Card
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-          child: _buildAppCard(
-            app: _apps['claude']!,
-            accentColor: const Color(0xFFD27354),
-            iconAsset: 'assets/icons/claude.png',
-            subtitle: 'Claude AI Desktop & Sessioni Code',
+        for (final app in managedApps)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+            child: AppCard(
+              app: app,
+              info: _pc.app(app.key),
+              online: online,
+              busy: _pc.isBusy(app.key),
+              onToggle: () => _pc.toggleApp(app.key),
+            ),
           ),
-        ),
-
-        // Antigravity 2.0 App Card
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-          child: _buildAppCard(
-            app: _apps['antigravity']!,
-            accentColor: const Color(0xFFA855F7),
-            iconAsset: 'assets/icons/antigravity.png',
-            subtitle: 'Antigravity Coding Agent Daemon',
-          ),
-        ),
-
-        // Prototype Demo Controls & Footer
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
-          child: Column(
-            children: [
-              // Test animation button for prototype (scaled down on narrow columns)
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                child: SleekOutlineButton(
-                  height: 38,
-                  borderWidth: 1.1,
-                  borderColor: const Color(0xFF475569),
-                  textColor: const Color(0xFF94A3B8),
-                  label: 'TEST PROTOTIPO: TORNA A PC SPENTO',
-                  icon: const Icon(Icons.restart_alt_rounded, size: 16),
-                  onPressed: () {
-                    setState(() => _simulatedOnline = false);
-                    _transitionController.reverse();
-                  },
-                ),
-              ),
-              const SizedBox(height: 16),
-              Center(
-                child: Text(
-                  'Aggiornamento Realtime • Firebase & Home Assistant',
-                  style: TextStyle(
-                    color: const Color(0xFF475569).withValues(alpha: 0.8),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ],
+          child: Text(
+            _pc.reachable
+                ? 'Aggiornamento ogni 3 s • Firebase & Home Assistant'
+                : 'Firebase non raggiungibile • riprovo ogni 3 s',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: _pc.reachable
+                  ? const Color(0xFF475569).withValues(alpha: 0.8)
+                  : const Color(0xFFFCA5A5),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ],
-    );
-  }
-
-  /// Power Control Card with Slender Outline Buttons
-  Widget _buildPowerControlCard() {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0E1015),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF1F232E), width: 1.1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: const Color(0xFF00E5FF).withValues(alpha: 0.5),
-                    width: 1.1,
-                  ),
-                ),
-                child: const Icon(
-                  Icons.power_settings_new_rounded,
-                  color: Color(0xFF00E5FF),
-                  size: 18,
-                ),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Alimentazione PC',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    Text(
-                      'Presa smart switch.computer_presa_1',
-                      style: TextStyle(
-                        color: Color(0xFF64748B),
-                        fontSize: 11.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Two slender outline buttons
-          Row(
-            children: [
-              Expanded(
-                child: SleekOutlineButton(
-                  height: 46,
-                  borderWidth: 1.3,
-                  borderColor: const Color(0xFFEF4444),
-                  textColor: const Color(0xFFEF4444),
-                  label: 'SPEGNI PC',
-                  icon: const Icon(Icons.power_settings_new_rounded, size: 18),
-                  isLoading: _isTurningOffPc,
-                  onPressed: _turnOffPcWithConfirmation,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: SleekOutlineButton(
-                  height: 46,
-                  borderWidth: 1.3,
-                  borderColor: const Color(0xFF00E5FF),
-                  textColor: const Color(0xFF00E5FF),
-                  label: 'AGGIORNA',
-                  icon: const Icon(Icons.refresh_rounded, size: 18),
-                  isLoading: _isRefreshing,
-                  onPressed: () => _fetchData(showLoader: true),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// App Card with Slender Outline Action Button
-  Widget _buildAppCard({
-    required AppInfo app,
-    required Color accentColor,
-    required String iconAsset,
-    required String subtitle,
-  }) {
-    final isOnline = _isEffectiveOnline;
-    final isRunning = isOnline && app.isRunning;
-
-    // Button states
-    final actionColor = isRunning ? const Color(0xFFEF4444) : const Color(0xFF10B981);
-    final actionLabel = isRunning
-        ? 'ARRESTA ${app.displayName.toUpperCase()}'
-        : 'AVVIA ${app.displayName.toUpperCase()}';
-    final actionIcon = isRunning ? Icons.stop_rounded : Icons.play_arrow_rounded;
-
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0E1015),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isRunning
-              ? const Color(0xFF10B981).withValues(alpha: 0.35)
-              : const Color(0xFF1F232E),
-          width: 1.1,
-        ),
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              // Slender outlined icon avatar
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: accentColor.withValues(alpha: 0.5),
-                    width: 1.2,
-                  ),
-                ),
-                child: Center(
-                  child: Image.asset(
-                    iconAsset,
-                    width: 22,
-                    height: 22,
-                    filterQuality: FilterQuality.medium,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-
-              // Title and Subtitle
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      app.displayName,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: const TextStyle(
-                        color: Color(0xFF64748B),
-                        fontSize: 11.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              // Status Outline Badge
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: !isOnline
-                        ? const Color(0xFF475569)
-                        : (isRunning ? const Color(0xFF10B981) : const Color(0xFFEF4444)),
-                    width: 1.0,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: !isOnline
-                            ? const Color(0xFF475569)
-                            : (isRunning ? const Color(0xFF10B981) : const Color(0xFFEF4444)),
-                      ),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      isOnline ? app.actualState : 'N/D',
-                      style: TextStyle(
-                        color: !isOnline
-                            ? const Color(0xFF94A3B8)
-                            : (isRunning ? const Color(0xFF10B981) : const Color(0xFFEF4444)),
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.4,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 16),
-          const Divider(color: Color(0xFF1A1E29), height: 1),
-          const SizedBox(height: 14),
-
-          // Primary Slender Action Button matching "tasti snelli con solo bordo tasti colorato"
-          SizedBox(
-            width: double.infinity,
-            child: SleekOutlineButton(
-              height: 44,
-              borderWidth: 1.3,
-              borderColor: actionColor,
-              textColor: actionColor,
-              isLoading: app.isMutating,
-              label: app.isMutating ? 'ATTENDI PC...' : actionLabel,
-              icon: app.isMutating ? null : Icon(actionIcon, size: 20),
-              onPressed: isOnline ? () => _toggleAppState(app.key) : null,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

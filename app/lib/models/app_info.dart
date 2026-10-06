@@ -1,66 +1,23 @@
-class AppInfo {
-  final String key;
-  final String displayName;
-  final String actualState;
-  final bool isMutating;
-  // Esito dell'ultimo comando, pubblicato dall'agent sul PC in apps/<key>/result
-  final String? resultId;
-  final String? resultStatus;
-  final String? resultMessage;
+import 'command_result.dart';
 
-  AppInfo({
-    required this.key,
-    required this.displayName,
-    required this.actualState,
-    this.isMutating = false,
-    this.resultId,
-    this.resultStatus,
-    this.resultMessage,
-  });
+/// Stato di un'app sul PC come lo pubblica l'agent in `apps/<key>`.
+class AppInfo {
+  const AppInfo({required this.key, this.actualState = 'STOPPED', this.result});
+
+  final String key;
+  final String actualState;
+
+  /// Esito dell'ultimo comando eseguito dall'agent per questa app.
+  final CommandResult? result;
 
   bool get isRunning => actualState.toUpperCase() == 'RUNNING';
 
-  AppInfo copyWith({
-    String? key,
-    String? displayName,
-    String? actualState,
-    bool? isMutating,
-    String? resultId,
-    String? resultStatus,
-    String? resultMessage,
-  }) {
-    return AppInfo(
-      key: key ?? this.key,
-      displayName: displayName ?? this.displayName,
-      actualState: actualState ?? this.actualState,
-      isMutating: isMutating ?? this.isMutating,
-      resultId: resultId ?? this.resultId,
-      resultStatus: resultStatus ?? this.resultStatus,
-      resultMessage: resultMessage ?? this.resultMessage,
-    );
-  }
-
-  factory AppInfo.fromJson(String key, String displayName, Map<String, dynamic>? json) {
-    if (json == null) {
-      return AppInfo(
-        key: key,
-        displayName: displayName,
-        actualState: 'STOPPED',
-      );
-    }
-
-    final actual = (json['actual_state'] ?? 'STOPPED').toString().toUpperCase();
-    final result = json['result'] is Map<String, dynamic>
-        ? json['result'] as Map<String, dynamic>
-        : null;
-
+  factory AppInfo.fromJson(String key, Object? json) {
+    if (json is! Map) return AppInfo(key: key);
     return AppInfo(
       key: key,
-      displayName: displayName,
-      actualState: actual,
-      resultId: result?['id']?.toString(),
-      resultStatus: result?['status']?.toString(),
-      resultMessage: result?['message']?.toString(),
+      actualState: (json['actual_state'] ?? 'STOPPED').toString().toUpperCase(),
+      result: CommandResult.fromJson(json['result']),
     );
   }
 }
