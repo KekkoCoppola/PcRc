@@ -50,6 +50,9 @@ START_TIMEOUT_S = 30
 # Secondi tra il comando SHUTDOWN e lo spegnimento di Windows: bastano all'agent
 # per pubblicare l'esito prima di essere chiuso
 SHUTDOWN_DELAY_S = 10
+# Silenzio massimo tra due heartbeat perché valga come riavvio del solo agent:
+# oltre, il PC è stato spento e "acceso da" riparte
+RESUME_GAP_S = 30
 # Azioni ammesse per le app (apps/<app>/command) e per il PC (pc/command)
 APP_ACTIONS = ("START", "STOP")
 PC_ACTIONS = ("SHUTDOWN",)
@@ -247,6 +250,7 @@ class Agent:
         self.online = None              # esito dell'ultimo giro, per loggare solo i cambi
         self.first_since = first_since  # (cfg, running) -> inizio dello stato alla prima occhiata
         self.states = {}                # app -> (running, secondi epoch di inizio dello stato)
+        self.pc_since = None            # secondi epoch da cui il PC manda heartbeat senza interruzioni
 
     def tick(self):
         """Un giro di lavoro. Non solleva mai: se Firebase non risponde riprova al giro dopo."""
@@ -266,6 +270,7 @@ class Agent:
                 self.pending[f"apps/{key}/since"] = self._state_since(
                     key, cfg, running, apps_node.get(key))
             self._dispatch("pc", root.get("pc"), PC_ACTIONS, lambda action: self.shutdown())
+            self.pending["pc_status/since"] = self._online_since(root.get("pc_status"))
             self.pending["pc_status/online"] = True
             self.pending["pc_status/last_seen"] = int(self.now())
             self.write(dict(self.pending))
@@ -278,6 +283,24 @@ class Agent:
             if self.online is False:
                 log.info("Connessione a Firebase ripristinata")
             self.online = True
+
+    def _online_since(self, status):
+        """Da quando il PC è acceso: inizio della sessione di heartbeat continua.
+
+        Al primo giro riprende il since già pubblicato se l'ultimo heartbeat è recente
+        (si è riavviato solo l'agent); altrimenti il PC si è appena acceso.
+        Non usa psutil.boot_time(): con l'avvio rapido di Windows non si azzera.
+        """
+        if self.pc_since is None:
+            status = status if isinstance(status, dict) else {}
+            since, last_seen = status.get("since"), status.get("last_seen")
+            now = self.now()
+            if (isinstance(since, int) and isinstance(last_seen, (int, float))
+                    and 0 <= now - last_seen <= RESUME_GAP_S and since <= now):
+                self.pc_since = since
+            else:
+                self.pc_since = int(now)
+        return self.pc_since
 
     def _state_since(self, key, cfg, running, node):
         """Secondi epoch dall'ultimo cambio di stato dell'app (aperta/chiusa).

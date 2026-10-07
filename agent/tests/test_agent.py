@@ -520,6 +520,32 @@ class StateSinceTest(unittest.TestCase):
         self.assertEqual(db.get("apps/claude/since"), FIRST_SINCE)
 
 
+class PcSinceTest(unittest.TestCase):
+    def test_first_heartbeat_after_power_on_starts_the_count(self):
+        db = FakeDb({})
+
+        make_agent(db, FakeExecutor()).tick()
+
+        self.assertEqual(db.get("pc_status/since"), NOW_MS // 1000)
+
+    def test_agent_restart_keeps_the_count(self):
+        powered_on = NOW_MS // 1000 - 3600
+        db = FakeDb({})
+        db.root["pc_status"] = {"since": powered_on, "last_seen": NOW_MS // 1000 - 5}
+
+        make_agent(db, FakeExecutor()).tick()
+
+        self.assertEqual(db.get("pc_status/since"), powered_on)
+
+    def test_long_silence_means_the_pc_was_off(self):
+        db = FakeDb({})
+        db.root["pc_status"] = {"since": NOW_MS // 1000 - 7200, "last_seen": NOW_MS // 1000 - 600}
+
+        make_agent(db, FakeExecutor()).tick()
+
+        self.assertEqual(db.get("pc_status/since"), NOW_MS // 1000)
+
+
 class StateStartedAtTest(unittest.TestCase):
     def test_running_app_counts_from_its_process_start(self):
         dummy = dummy_exe(self, "pcrc_dummy_since.exe")

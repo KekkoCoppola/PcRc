@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pcrc/models/app_info.dart';
 import 'package:pcrc/models/managed_app.dart';
+import 'package:pcrc/utils/format_elapsed.dart';
 import 'package:pcrc/widgets/app_card.dart';
 import 'package:pcrc/widgets/mono_switch.dart';
 

@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../models/app_info.dart';
 import '../models/managed_app.dart';
+import '../utils/format_elapsed.dart';
+import 'folder_shape.dart';
 import 'mono_switch.dart';
 
 /// Card a cartella di un'app del PC: linguetta con lo stato, tempo dall'ultimo
@@ -46,27 +48,27 @@ class AppCard extends StatelessWidget {
       duration: const Duration(milliseconds: 420),
       curve: Curves.easeOutCubic,
       builder: (context, t, _) => CustomPaint(
-        painter: _FolderPainter(glow: t, borderAlpha: lerpDouble(0.28, 0.92, t)!),
+        painter: FolderPainter(glow: t, borderAlpha: lerpDouble(0.28, 0.92, t)!),
         child: SizedBox(
-          height: _FolderPainter.tabHeight + _bodyHeight,
+          height: FolderPainter.tabHeight + _bodyHeight,
           child: Stack(
             children: [
               Positioned(
                 left: 0,
                 top: 0,
-                width: _FolderPainter.tabWidth,
-                height: _FolderPainter.tabHeight,
+                width: FolderPainter.defaultTabWidth,
+                height: FolderPainter.tabHeight,
                 child: _StateTab(active: active, t: t),
               ),
               if (elapsed != null)
                 Positioned(
                   right: 6,
                   top: 0,
-                  height: _FolderPainter.tabHeight,
+                  height: FolderPainter.tabHeight,
                   child: _Elapsed(text: 'da ${formatElapsed(elapsed)}', t: t),
                 ),
               Positioned.fill(
-                top: _FolderPainter.tabHeight,
+                top: FolderPainter.tabHeight,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Row(
@@ -103,14 +105,6 @@ class AppCard extends StatelessWidget {
       ),
     );
   }
-}
-
-/// "12s", "52m", "3h 05m", "2g 4h".
-String formatElapsed(Duration d) {
-  if (d.inMinutes < 1) return '${d.inSeconds}s';
-  if (d.inHours < 1) return '${d.inMinutes}m';
-  if (d.inDays < 1) return '${d.inHours}h ${(d.inMinutes % 60).toString().padLeft(2, '0')}m';
-  return '${d.inDays}g ${d.inHours % 24}h';
 }
 
 class _StateTab extends StatelessWidget {
@@ -229,77 +223,4 @@ class _LogoDiamond extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Sagoma a cartella: linguetta in alto a sinistra che scende con una curva a S nel corpo.
-class _FolderPainter extends CustomPainter {
-  _FolderPainter({required this.glow, required this.borderAlpha});
-
-  static const double tabWidth = 122;
-  static const double tabHeight = 34;
-  static const double _radius = 18;
-  static const double _slope = 22;
-
-  /// 0 = inattiva, 1 = attiva.
-  final double glow;
-  final double borderAlpha;
-
-  Path _shape(Size size) {
-    final w = size.width, h = size.height;
-    const r = _radius, t = tabHeight, tw = tabWidth, s = _slope;
-    const corner = Radius.circular(r);
-    return Path()
-      ..moveTo(0, r)
-      ..arcToPoint(const Offset(r, 0), radius: corner)
-      ..lineTo(tw - s, 0)
-      ..cubicTo(tw, 0, tw, t, tw + s, t)
-      ..lineTo(w - r, t)
-      ..arcToPoint(Offset(w, t + r), radius: corner)
-      ..lineTo(w, h - r)
-      ..arcToPoint(Offset(w - r, h), radius: corner)
-      ..lineTo(r, h)
-      ..arcToPoint(Offset(0, h - r), radius: corner)
-      ..close();
-  }
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = _shape(size);
-    final bounds = Offset.zero & size;
-
-    canvas.drawShadow(path, Colors.black, 10, false);
-    if (glow > 0) {
-      canvas.drawPath(
-        path,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 6
-          ..color = Colors.white.withValues(alpha: 0.10 * glow)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
-      );
-    }
-    canvas.drawPath(
-      path,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color.lerp(const Color(0xFF101116), const Color(0xFF16171D), glow)!,
-            const Color(0xFF06070A),
-          ],
-        ).createShader(bounds),
-    );
-    canvas.drawPath(
-      path,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.4
-        ..color = Colors.white.withValues(alpha: borderAlpha),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _FolderPainter old) =>
-      old.glow != glow || old.borderAlpha != borderAlpha;
 }

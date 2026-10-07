@@ -37,7 +37,7 @@ L'agent scarta i comandi più vecchi di 120 s: un comando rimasto in sospeso a P
 app/        App Flutter (Android, iOS, web, desktop)
 agent/      agent.pyw, test, requirements.txt, firebase_key.json (non nel repo)
 scripts/    build_apk.ps1, install_agent.ps1, presa.ps1, accendiPC.bat, spegniPC.bat
-tools/      script per gli asset (foto del case, icone) e Sysinternals Autologon
+tools/      sorgenti grafici (logo in tools/logo, foto del case, icone), script per gli asset e Sysinternals Autologon
 dist/       APK pronti da installare (non nel repo)
 secrets.json  indirizzi e token (non nel repo, modello: secrets.example.json)
 ```

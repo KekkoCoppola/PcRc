@@ -74,7 +74,7 @@ void main() {
         asked = request.url;
         return http.Response(
           jsonEncode({
-            'pc_status': {'online': true, 'last_seen': 1790000000},
+            'pc_status': {'online': true, 'last_seen': 1790000000, 'since': 1789990000},
             'pc': {
               'result': {'id': 's1', 'status': 'OK', 'message': 'spegnimento tra 10s'},
             },
@@ -94,6 +94,7 @@ void main() {
 
       expect(asked.toString(), 'https://db.example/.json');
       expect(snapshot!.pcStatus.lastSeen, 1790000000);
+      expect(snapshot.pcStatus.since, 1789990000);
       expect(snapshot.pcResult!.id, 's1');
       expect(snapshot.apps['claude']!.isRunning, isTrue);
       expect(snapshot.apps['antigravity']!.result!.message, 'avvio fallito');

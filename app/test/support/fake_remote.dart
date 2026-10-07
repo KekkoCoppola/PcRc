@@ -9,6 +9,9 @@ import 'package:pcrc/services/pc_remote.dart';
 /// `plug?`, `plug:on`, `plug:off`, `pc:SHUTDOWN`, `app:<key>:START|STOP`.
 class FakeRemote implements PcRemote {
   int? lastSeen;
+
+  /// Secondi epoch dell'accensione del PC (`pc_status/since`).
+  int? pcSince;
   final Map<String, String> appStates = {};
   final Map<String, CommandResult> appResults = {};
   CommandResult? pcResult;
@@ -29,7 +32,7 @@ class FakeRemote implements PcRemote {
   Future<RemoteSnapshot?> fetchSnapshot() async {
     if (!firebaseUp) return null;
     return RemoteSnapshot(
-      pcStatus: PcStatus(lastSeen: lastSeen),
+      pcStatus: PcStatus(lastSeen: lastSeen, since: pcSince),
       apps: {
         for (final app in managedApps)
           app.key: AppInfo(

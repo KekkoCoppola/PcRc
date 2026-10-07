@@ -1,9 +1,12 @@
 /// Heartbeat del PC: l'agent scrive `pc_status/last_seen` (secondi epoch) ogni 2 s.
 class PcStatus {
-  const PcStatus({this.lastSeen});
+  const PcStatus({this.lastSeen, this.since});
 
   /// Secondi epoch dell'ultimo heartbeat, null se il PC non si è mai fatto sentire.
   final int? lastSeen;
+
+  /// Secondi epoch da cui l'agent manda heartbeat senza interruzioni: accensione del PC.
+  final int? since;
 
   /// Oltre questo silenzio il PC è considerato spento.
   static const onlineWindow = Duration(seconds: 10);
@@ -19,7 +22,15 @@ class PcStatus {
     }
     // Tollera valori in millisecondi
     if (seconds != null && seconds > 10000000000) seconds ~/= 1000;
-    return PcStatus(lastSeen: seconds);
+    final since = json['since'];
+    return PcStatus(lastSeen: seconds, since: since is num ? since.toInt() : null);
+  }
+
+  /// Da quanto il PC è acceso, null se è spento o l'agent non lo pubblica.
+  Duration? onlineForAt(DateTime now) {
+    if (since == null || !isOnlineAt(now)) return null;
+    final seconds = now.millisecondsSinceEpoch ~/ 1000 - since!;
+    return Duration(seconds: seconds < 0 ? 0 : seconds);
   }
 
   /// Secondi trascorsi dall'ultimo heartbeat (negativo se l'orologio del telefono è indietro).

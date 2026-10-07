@@ -35,14 +35,18 @@ void main() {
   });
 
   testWidgets('PC already on: opens on the dashboard, no prototype leftovers', (tester) async {
-    remote.heartbeat(DateTime.now());
+    final now = DateTime.now();
+    remote.heartbeat(now);
+    remote.pcSince = now.subtract(const Duration(hours: 2, minutes: 15)).millisecondsSinceEpoch ~/ 1000;
 
     // Tablet orizzontale: il font di test ha glifi quadrati, servono colonne larghe.
     await pumpApp(tester, size: const Size(1180, 820));
     await tester.pump(const Duration(seconds: 1));
 
     expect(find.text('Applicazioni & Processi'), findsOneWidget);
-    expect(find.text('SPEGNI PC'), findsOneWidget);
+    expect(find.text('Acceso da 2h 15m'), findsOneWidget);
+    expect(find.text('Alimentazione PC'), findsNothing);
+    expect(find.textContaining('Aggiornamento ogni'), findsNothing);
     expect(find.bySemanticsLabel('PC acceso'), findsOneWidget);
     expect(find.byType(PowerButtonWidget), findsNothing);
     expect(find.textContaining('PROTOTIPO'), findsNothing);
@@ -92,19 +96,46 @@ void main() {
     expect(find.text('PC SPENTO'), findsOneWidget);
   });
 
-  testWidgets('SPEGNI PC asks for confirmation, then sends SHUTDOWN', (tester) async {
-    remote.heartbeat(DateTime.now());
-    await pumpApp(tester, size: const Size(1180, 820));
-    await tester.pump(const Duration(seconds: 1));
+  group('tap on the PC', () {
+    Future<void> openShutdownDialog(WidgetTester tester) async {
+      remote.heartbeat(DateTime.now());
+      await pumpApp(tester, size: const Size(1180, 820));
+      await tester.pump(const Duration(seconds: 1));
 
-    await tester.tap(find.text('SPEGNI PC'));
-    await tester.pump(const Duration(milliseconds: 500));
-    expect(find.text('Spegnere il PC?'), findsOneWidget);
+      await tester.tap(find.byType(PcCaseHero));
+      await tester.pump(const Duration(milliseconds: 400));
+    }
 
-    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('SPEGNI PC')));
-    await tester.pump(const Duration(milliseconds: 500));
+    testWidgets('PC on: asks "Vuoi spegnere il PC?", SPEGNI sends SHUTDOWN', (tester) async {
+      await openShutdownDialog(tester);
+      expect(find.text('Vuoi spegnere il PC?'), findsOneWidget);
 
-    expect(remote.calls, ['pc:SHUTDOWN']);
+      await tester.tap(find.text('SPEGNI'));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(remote.calls, ['pc:SHUTDOWN']);
+      expect(find.text('Vuoi spegnere il PC?'), findsNothing);
+    });
+
+    testWidgets('ANNULLA closes the dialog without sending anything', (tester) async {
+      await openShutdownDialog(tester);
+
+      await tester.tap(find.text('ANNULLA'));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(remote.calls, isEmpty);
+      expect(find.text('Vuoi spegnere il PC?'), findsNothing);
+    });
+
+    testWidgets('PC off: tapping the photo does nothing', (tester) async {
+      await pumpApp(tester);
+
+      await tester.tap(find.byType(PcCaseHero));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('Vuoi spegnere il PC?'), findsNothing);
+      expect(remote.calls, isEmpty);
+    });
   });
 
   testWidgets('build without secrets.json says so instead of failing silently', (tester) async {

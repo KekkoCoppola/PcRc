@@ -7,12 +7,12 @@ import '../config/app_config.dart';
 import '../controllers/pc_controller.dart';
 import '../models/managed_app.dart';
 import '../services/remote_control_service.dart';
+import '../utils/format_elapsed.dart';
 import '../widgets/ambient_background.dart';
 import '../widgets/app_card.dart';
+import '../widgets/folder_dialog.dart';
 import '../widgets/off_controls.dart';
 import '../widgets/pc_case_hero.dart';
-import '../widgets/power_card.dart';
-import '../widgets/sleek_outline_button.dart';
 
 class HomeScreen extends StatefulWidget {
   /// [controller] serve ai test; di default parla con Firebase e Home Assistant
@@ -28,7 +28,6 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   late final PcController _pc;
   late final StreamSubscription<PcMessage> _messages;
-  bool _refreshing = false;
 
   // Transizione tra controlli da spento (0.0) e dashboard da acceso (1.0)
   late final AnimationController _transition;
@@ -87,92 +86,29 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _refresh() async {
-    setState(() => _refreshing = true);
-    await _pc.refresh();
-    if (mounted) setState(() => _refreshing = false);
-  }
-
   Future<void> _onPowerTap() async {
     final result = await _pc.powerOn();
     if (result != PowerOnResult.needsPlugCycle || !mounted) return;
-    final cycle = await _confirm(
+    final cycle = await showFolderDialog(
+      context,
       icon: Icons.power_rounded,
-      color: const Color(0xFF00E5FF),
       title: 'Presa già accesa',
-      body: 'La presa risulta accesa ma il PC non risponde, di solito perché è stato spento '
-          'da Windows. La spengo e la riaccendo per farlo ripartire?\n\n'
+      body: 'Il PC non risponde, di solito perché è stato spento da Windows. '
+          'Spengo e riaccendo la presa per farlo ripartire?\n\n'
           'Se il PC fosse acceso ma senza agent, verrebbe spento di colpo.',
-      confirmLabel: 'RIAVVIA PRESA',
+      confirmLabel: 'RIAVVIA',
     );
     if (cycle) await _pc.powerOn(cyclePlug: true);
   }
 
+  /// Tocco sull'immagine del PC acceso: Windows si spegne, poi la presa viene staccata.
   Future<void> _onShutdownTap() async {
-    final confirm = await _confirm(
-      icon: Icons.power_settings_new_rounded,
-      color: const Color(0xFFEF4444),
-      title: 'Spegnere il PC?',
-      body: 'Windows si spegne e chiude tutte le app. A spegnimento completato '
-          'la presa viene staccata.',
-      confirmLabel: 'SPEGNI PC',
+    final confirm = await showFolderDialog(
+      context,
+      title: 'Vuoi spegnere il PC?',
+      confirmLabel: 'SPEGNI',
     );
     if (confirm) await _pc.shutdown();
-  }
-
-  Future<bool> _confirm({
-    required IconData icon,
-    required Color color,
-    required String title,
-    required String body,
-    required String confirmLabel,
-  }) async {
-    final result = await showDialog<bool>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.75),
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF0F1117),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: Color(0xFF262B38), width: 1.2),
-        ),
-        title: Row(
-          children: [
-            Icon(icon, color: color, size: 24),
-            const SizedBox(width: 10),
-            Flexible(
-              child: Text(
-                title,
-                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-        ),
-        content: Text(body, style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 14)),
-        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        actions: [
-          SleekOutlineButton(
-            height: 40,
-            borderWidth: 1.1,
-            borderColor: const Color(0xFF475569),
-            textColor: const Color(0xFFCBD5E1),
-            label: 'ANNULLA',
-            onPressed: () => Navigator.of(ctx).pop(false),
-          ),
-          const SizedBox(width: 8),
-          SleekOutlineButton(
-            height: 40,
-            borderWidth: 1.3,
-            borderColor: color,
-            textColor: color,
-            label: confirmLabel,
-            icon: Icon(icon, size: 16),
-            onPressed: () => Navigator.of(ctx).pop(true),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
   }
 
   void _showSnack(String text, {required bool isError}) {
@@ -215,6 +151,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
+  /// Foto del PC; da acceso un tocco apre il modale di spegnimento.
+  Widget _buildHero(double height) {
+    return _PressablePc(
+      enabled: _pc.phase == PcPhase.online,
+      onTap: _onShutdownTap,
+      child: PcCaseHero(poweredOn: _pc.ledsOn, height: height),
+    );
+  }
+
   /// Telefono e tablet in verticale: PC centrato in alto, controlli sotto.
   Widget _buildColumnLayout(BoxConstraints constraints) {
     final heroHeight = math.min(
@@ -227,7 +172,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.only(top: 20, bottom: 8),
-            child: Center(child: PcCaseHero(poweredOn: _pc.ledsOn, height: heroHeight)),
+            child: Center(child: _buildHero(heroHeight)),
           ),
         ),
         SliverToBoxAdapter(
@@ -254,7 +199,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 math.min(constraints.maxHeight * 0.92, 640.0),
                 constraints.maxWidth / PcCaseHero.widthFor(1),
               );
-              return Center(child: PcCaseHero(poweredOn: _pc.ledsOn, height: heroHeight));
+              return Center(child: _buildHero(heroHeight));
             },
           ),
         ),
@@ -338,16 +283,20 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       mainAxisSize: MainAxisSize.min,
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-          child: PowerCard(
-            controller: _pc,
-            onShutdown: _onShutdownTap,
-            onRefresh: _refresh,
-            refreshing: _refreshing,
+          padding: const EdgeInsets.fromLTRB(20, 2, 20, 6),
+          child: Text(
+            _pcStatusLine(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: const Color(0xFF475569).withValues(alpha: 0.8),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -395,23 +344,58 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               onToggle: () => _pc.toggleApp(app.key),
             ),
           ),
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
-          child: Text(
-            _pc.reachable
-                ? 'Aggiornamento ogni 3 s • Firebase & Home Assistant'
-                : 'Firebase non raggiungibile • riprovo ogni 3 s',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: _pc.reachable
-                  ? const Color(0xFF475569).withValues(alpha: 0.8)
-                  : const Color(0xFFFCA5A5),
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
+        const SizedBox(height: 24),
       ],
+    );
+  }
+
+  /// Riga quasi invisibile sotto il PC: da quanto è acceso, l'avanzamento dello
+  /// spegnimento o il problema di rete.
+  String _pcStatusLine() {
+    if (!_pc.reachable) return 'Firebase non raggiungibile, riprovo...';
+    if (_pc.phase == PcPhase.shuttingDown) return _pc.shutdownStatus;
+    final onFor = _pc.pcStatus.onlineForAt(DateTime.now());
+    return onFor == null ? 'Acceso' : 'Acceso da ${formatElapsed(onFor)}';
+  }
+}
+
+/// Rende toccabile la foto del PC, con un leggero affondo mentre è premuta.
+class _PressablePc extends StatefulWidget {
+  const _PressablePc({required this.enabled, required this.onTap, required this.child});
+
+  final bool enabled;
+  final VoidCallback onTap;
+  final Widget child;
+
+  @override
+  State<_PressablePc> createState() => _PressablePcState();
+}
+
+class _PressablePcState extends State<_PressablePc> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed != value) setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.enabled) return widget.child;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => _setPressed(true),
+        onTapUp: (_) => _setPressed(false),
+        onTapCancel: () => _setPressed(false),
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _pressed ? 0.97 : 1,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOut,
+          child: widget.child,
+        ),
+      ),
     );
   }
 }
