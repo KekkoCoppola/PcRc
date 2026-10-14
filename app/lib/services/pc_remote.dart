@@ -18,5 +18,8 @@ abstract interface class PcRemote {
   /// Accende o spegne la presa: true se Home Assistant ha eseguito.
   Future<bool> setPlug(bool on);
 
+  /// Registra il token FCM del telefono: l'agent ci manda le notifiche. True se scritto.
+  Future<bool> registerDevice(String token);
+
   void dispose();
 }

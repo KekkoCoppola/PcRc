@@ -76,16 +76,30 @@ class AppCard extends StatelessWidget {
                       _LogoDiamond(app: app, t: t),
                       const SizedBox(width: 18),
                       Expanded(
-                        child: Text(
-                          app.displayName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Color.lerp(const Color(0xFFA3A8B4), Colors.white, t),
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: -0.2,
-                          ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              app.displayName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Color.lerp(const Color(0xFFA3A8B4), Colors.white, t),
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -0.2,
+                              ),
+                            ),
+                            if (online && info.activity != AgentActivity.idle) ...[
+                              const SizedBox(height: 4),
+                              _ActivityLine(
+                                key: const ValueKey('activity'),
+                                activity: info.activity,
+                                project: info.activityProject,
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -147,6 +161,40 @@ class _StateTab extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Cosa fa l'agente AI dell'app: al lavoro, in attesa dell'utente, turno finito.
+/// L'attesa è in bianco pieno: è l'unico stato che chiede di fare qualcosa.
+class _ActivityLine extends StatelessWidget {
+  const _ActivityLine({super.key, required this.activity, this.project});
+
+  final AgentActivity activity;
+  final String? project;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, label) = switch (activity) {
+      AgentActivity.working => (Icons.autorenew_rounded, 'Sta lavorando'),
+      AgentActivity.waiting => (Icons.front_hand_rounded, 'Aspetta te'),
+      AgentActivity.done => (Icons.check_rounded, 'Ha finito'),
+      AgentActivity.idle => (Icons.remove_rounded, ''),
+    };
+    final color = Colors.white.withValues(alpha: activity == AgentActivity.waiting ? 1 : 0.62);
+    return Row(
+      children: [
+        Icon(icon, size: 13, color: color),
+        const SizedBox(width: 5),
+        Flexible(
+          child: Text(
+            project == null ? label : '$label · $project',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: color, fontSize: 12.5, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
     );
   }
 }

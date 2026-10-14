@@ -75,6 +75,14 @@ class FakeRemote implements PcRemote {
     return setPlugOk;
   }
 
+  final List<String> devices = [];
+
+  @override
+  Future<bool> registerDevice(String token) async {
+    devices.add(token);
+    return true;
+  }
+
   @override
   void dispose() {}
 }

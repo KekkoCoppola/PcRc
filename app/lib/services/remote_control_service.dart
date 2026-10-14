@@ -65,6 +65,27 @@ class RemoteControlService implements PcRemote {
     }
   }
 
+  /// Scrive `devices/<token>`: il token FCM contiene solo caratteri ammessi nelle chiavi.
+  @override
+  Future<bool> registerDevice(String token) async {
+    try {
+      final response = await _client
+          .put(
+            Uri.parse('$_dbUrl/devices/$token.json'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'token': token,
+              'platform': 'android',
+              'ts': {'.sv': 'timestamp'},
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
+      return _isSuccess(response);
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   Future<bool?> fetchPlugOn() async {
     try {

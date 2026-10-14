@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../config/app_config.dart';
 import '../controllers/pc_controller.dart';
 import '../models/managed_app.dart';
+import '../services/push_notifications.dart';
 import '../services/remote_control_service.dart';
 import '../utils/format_elapsed.dart';
 import '../widgets/ambient_background.dart';
@@ -44,6 +45,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           RemoteControlService(AppConfig.fromEnvironment),
           configured: AppConfig.fromEnvironment.isComplete,
         );
+    if (widget.controller == null && AppConfig.fromEnvironment.isComplete) {
+      // Client suo: resta vivo per gli aggiornamenti del token
+      startPushNotifications(RemoteControlService(AppConfig.fromEnvironment));
+    }
 
     _transition = AnimationController(vsync: this, duration: const Duration(milliseconds: 750));
     _fadeOffScreen = Tween<double>(begin: 1.0, end: 0.0).animate(

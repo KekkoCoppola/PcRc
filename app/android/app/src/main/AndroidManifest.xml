@@ -1,9 +1,31 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Live Update (Android 16+): pillola in barra di stato con lo stato di Claude e Antigravity.
+         Permesso normale, concesso all'installazione. -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS"/>
     <application
         android:label="PcRc"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- Messaggi FCM: il servizio di firebase_messaging è sostituito dal nostro, che lo estende -->
+        <service
+            android:name="io.flutter.plugins.firebase.messaging.FlutterFirebaseMessagingService"
+            tools:node="remove" />
+        <service
+            android:name=".PcRcMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".LiveUpdateDismissedReceiver"
+            android:exported="false" />
+        <!-- Tasti "Chiudi <app>" e "Interrompi" della Live Update -->
+        <receiver
+            android:name=".AgentCommandReceiver"
+            android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

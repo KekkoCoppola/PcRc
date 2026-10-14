@@ -139,18 +139,63 @@ class FakeShutdown:
         return self.result
 
 
-FAKE_APPS = {"claude": {"name": "claude"}, "antigravity": {"name": "antigravity"}}
+FAKE_APPS = {"claude": {"name": "claude", "display_name": "Claude"},
+             "antigravity": {"name": "antigravity", "display_name": "Antigravity"}}
 
 
 FIRST_SINCE = 1_789_990_000  # inizio dello stato visto alla prima occhiata (finto)
 
 
-def make_agent(db, execute, running=(), shutdown=None, now=lambda: NOW_MS / 1000):
+class FakeNotifier:
+    """Al posto di FCM: registra i messaggi; dead = chiavi dei token da dichiarare non validi."""
+
+    def __init__(self, dead=()):
+        self.sent = []
+        self.dead = list(dead)
+        self.lock = threading.Lock()
+
+    def __call__(self, tokens, data, collapse_key):
+        with self.lock:
+            self.sent.append({"tokens": dict(tokens), "data": dict(data), "collapse_key": collapse_key})
+        return self.dead
+
+    def wait_for(self, count, timeout_s=5):
+        """I messaggi partono da thread: aspetta che ne siano arrivati count."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self.lock:
+                if len(self.sent) >= count:
+                    return list(self.sent)
+            time.sleep(0.01)
+        raise AssertionError(f"attesi {count} messaggi, arrivati {len(self.sent)}")
+
+    def for_app(self, key):
+        with self.lock:
+            return [m["data"] for m in self.sent if m["collapse_key"] == key]
+
+
+class FakeInterrupt:
+    """Al posto del segnale per gli hook: registra le app da interrompere."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, key):
+        self.calls.append(key)
+        return "OK", "interruzione richiesta"
+
+
+def make_agent(db, execute, running=(), shutdown=None, now=lambda: NOW_MS / 1000,
+               activities=None, notify=None, interrupt=None):
+    activities = {} if activities is None else activities
     return agent.Agent(
         apps=FAKE_APPS, read_root=db.read_root, write=db.write, execute=execute,
         shutdown=shutdown or FakeShutdown(),
         is_running=lambda cfg: cfg["name"] in running,
         first_since=lambda cfg, running: FIRST_SINCE, now=now,
+        activity=lambda key, cfg: activities.get(key, ("IDLE", None)),
+        notify=notify or FakeNotifier(),
+        interrupt=interrupt or FakeInterrupt(),
     )
 
 
@@ -208,6 +253,10 @@ class NewCommandTest(unittest.TestCase):
     def test_unknown_action_is_rejected(self):
         node = {"command": {"id": "c1", "action": "REBOOT", "ts": NOW_MS}}
         self.assertIsNotNone(agent.new_command(node, NOW_MS, TTL_S)["error"])
+
+    def test_interrupt_is_an_app_action(self):
+        node = {"command": {"id": "c1", "action": "INTERRUPT", "ts": NOW_MS}}
+        self.assertIsNone(agent.new_command(node, NOW_MS, TTL_S)["error"])
 
     def test_timestamp_slightly_in_future_is_executable(self):
         # Orologio del PC indietro rispetto al server Firebase.
@@ -544,6 +593,201 @@ class PcSinceTest(unittest.TestCase):
         make_agent(db, FakeExecutor()).tick()
 
         self.assertEqual(db.get("pc_status/since"), NOW_MS // 1000)
+
+
+PHONE = {"phone1": {"token": "tok-1"}}
+
+
+class ActivityTest(unittest.TestCase):
+    """Stato di lavoro di Claude/Antigravity: pubblicato a ogni giro, notificato ai cambi."""
+
+    def setUp(self):
+        self.activities = {}
+        self.clock = [NOW_MS / 1000]
+        self.notifier = FakeNotifier()
+        self.db = FakeDb({})
+        self.db.root["devices"] = copy.deepcopy(PHONE)
+        self.agent = make_agent(self.db, FakeExecutor(), now=lambda: self.clock[0],
+                                activities=self.activities, notify=self.notifier)
+
+    def step(self, claude_state, project="PcRc", seconds=2):
+        self.clock[0] += seconds
+        self.activities["claude"] = (claude_state, project)
+        self.agent.tick()
+
+    def test_state_project_and_start_are_published(self):
+        self.step("WORKING")
+        self.step("WORKING", seconds=30)
+
+        self.assertEqual(self.db.get("apps/claude/activity"), "WORKING")
+        self.assertEqual(self.db.get("apps/claude/activity_project"), "PcRc")
+        self.assertEqual(self.db.get("apps/claude/activity_since"), NOW_MS // 1000 + 2)
+        self.assertEqual(self.db.get("apps/antigravity/activity"), "IDLE")
+
+    def claude_messages(self, count):
+        """Messaggi per la Live Update di Claude, quando ne sono arrivati almeno count."""
+        deadline = time.monotonic() + 5
+        while len(self.notifier.for_app("claude")) < count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        messages = self.notifier.for_app("claude")
+        self.assertGreaterEqual(len(messages), count)
+        return messages
+
+    def test_first_look_syncs_the_phone_without_alerting(self):
+        # Agent riavviato a metà turno: il telefono si allinea, ma senza suonare
+        self.step("WAITING")
+
+        self.assertEqual([(m["state"], m["alert"]) for m in self.claude_messages(1)], [("WAITING", "0")])
+        self.assertEqual(self.notifier.for_app("antigravity")[0]["state"], "IDLE")
+
+    def test_finishing_a_turn_alerts_every_registered_phone(self):
+        self.step("WORKING")
+        self.step("DONE")
+
+        done = self.claude_messages(2)[1]
+        self.assertEqual(done, {
+            "type": "activity", "app": "claude", "name": "Claude", "state": "DONE",
+            "project": "PcRc", "since": str(NOW_MS // 1000 + 4), "alert": "1", "guess": "0",
+            "ts": str(NOW_MS + 4000),
+        })
+        self.assertEqual(self.notifier.sent[-1]["tokens"], {"phone1": "tok-1"})
+
+    def test_waiting_for_the_user_alerts(self):
+        self.step("WORKING")
+        self.step("WAITING")
+
+        self.assertEqual(self.claude_messages(2)[1]["alert"], "1")
+
+    def test_other_changes_are_sent_without_alerting(self):
+        for state in ("IDLE", "WORKING", "IDLE", "DONE", "IDLE"):
+            self.step(state)
+
+        # DONE dopo IDLE: nessun turno visto finire (es. agent riavviato a metà)
+        messages = self.claude_messages(5)
+        self.assertEqual([m["state"] for m in messages], ["IDLE", "WORKING", "IDLE", "DONE", "IDLE"])
+        self.assertEqual({m["alert"] for m in messages}, {"0"})
+
+    def test_unchanged_state_is_resent_only_to_refresh_the_phone(self):
+        # Sul telefono la Live Update scade da sola se nessuno la rinfresca
+        self.step("WORKING")
+        self.step("WORKING", seconds=30)
+        sent_before_refresh = len(self.notifier.for_app("claude"))
+        self.step("WORKING", seconds=agent.ACTIVITY_REFRESH_S)
+
+        refreshed = self.claude_messages(2)[1]
+        self.assertEqual(sent_before_refresh, 1)
+        self.assertEqual((refreshed["state"], refreshed["alert"]), ("WORKING", "0"))
+        self.assertEqual(refreshed["since"], str(NOW_MS // 1000 + 2))
+
+    def test_idle_is_not_refreshed(self):
+        self.step("IDLE")
+        self.step("IDLE", seconds=agent.ACTIVITY_REFRESH_S + 1)
+        time.sleep(0.1)
+
+        self.assertEqual(len(self.notifier.for_app("claude")), 1)
+
+    def test_switching_project_is_sent_without_restarting_the_count(self):
+        self.step("WORKING", project="PcRc")
+        self.step("WORKING", project="MetaRisk")
+
+        moved = self.claude_messages(2)[1]
+        self.assertEqual((moved["project"], moved["since"]), ("MetaRisk", str(NOW_MS // 1000 + 2)))
+
+    def test_interrupt_from_the_phone_reaches_the_hooks_of_that_app(self):
+        interrupt = FakeInterrupt()
+        executor = FakeExecutor()
+        self.db.root["apps"]["claude"] = {"command": command("i1", "INTERRUPT")}
+        a = make_agent(self.db, executor, activities=self.activities, notify=self.notifier,
+                       interrupt=interrupt)
+
+        result = tick_until_result(self, a, self.db, "apps/claude", is_final)
+
+        self.assertEqual((result["id"], result["status"]), ("i1", "OK"))
+        self.assertEqual((interrupt.calls, executor.calls), (["claude"], []))
+
+    def test_turn_stopped_from_the_phone_ends_without_alerting(self):
+        # Hai premuto tu Interrompi: il 🟢 arriva in silenzio e dice che è stato interrotto
+        self.step("WORKING")
+        self.db.root["apps"]["claude"] = {"command": command("i1", "INTERRUPT", age_s=-2)}
+        self.step("WORKING")
+        tick_until_result(self, self.agent, self.db, "apps/claude", is_final)
+        self.step("DONE")
+
+        done = self.claude_messages(2)[-1]
+        self.assertEqual((done["state"], done["alert"], done["note"]), ("DONE", "0", "interrupted"))
+
+    def test_no_registered_phone_means_no_message(self):
+        del self.db.root["devices"]
+        self.step("WORKING")
+        self.step("DONE")
+        time.sleep(0.1)
+
+        self.assertEqual(self.notifier.sent, [])
+
+    def test_rejected_tokens_are_removed(self):
+        self.notifier.dead = ["phone1"]
+        self.step("WORKING")
+        self.notifier.wait_for(2)  # primo giro: Claude e Antigravity
+        time.sleep(0.05)
+
+        self.step("WORKING")
+
+        self.assertIsNone(self.db.get("devices/phone1"))
+
+    def test_broken_activity_reader_does_not_stop_the_heartbeat(self):
+        def broken(key, cfg):
+            raise OSError("disco")
+
+        a = agent.Agent(apps=FAKE_APPS, read_root=self.db.read_root, write=self.db.write,
+                        execute=FakeExecutor(), shutdown=FakeShutdown(), is_running=lambda cfg: False,
+                        first_since=lambda cfg, running: FIRST_SINCE, now=lambda: NOW_MS / 1000,
+                        activity=broken, notify=self.notifier)
+
+        a.tick()
+
+        self.assertIs(self.db.get("pc_status/online"), True)
+        self.assertIsNone(self.db.get("apps/claude/activity"))
+
+
+class ShouldAlertTest(unittest.TestCase):
+    def test_waiting_and_a_finished_turn_alert(self):
+        for previous in ("IDLE", "WORKING", "DONE"):
+            self.assertTrue(agent.should_alert(previous, "WAITING"), previous)
+        for previous in ("WORKING", "WAITING"):
+            self.assertTrue(agent.should_alert(previous, "DONE"), previous)
+
+    def test_other_changes_are_silent(self):
+        for previous, state in (("IDLE", "WORKING"), ("DONE", "IDLE"), ("IDLE", "DONE"),
+                                ("WAITING", "WORKING"), ("WAITING", "WAITING")):
+            self.assertFalse(agent.should_alert(previous, state), (previous, state))
+
+
+class ActivityMessageTest(unittest.TestCase):
+    def test_antigravity_waiting_is_marked_as_a_guess(self):
+        cfg = {"display_name": "Antigravity", "activity_stall_s": 30}
+
+        data = agent.activity_message("antigravity", cfg, "WAITING", None, 1_790_000_000, True, 1_790_000_050.5)
+
+        self.assertEqual(data, {
+            "type": "activity", "app": "antigravity", "name": "Antigravity", "state": "WAITING",
+            "project": "", "since": "1790000000", "alert": "1", "guess": "1", "ts": "1790000050500",
+        })
+        # FCM accetta solo stringhe nei dati
+        self.assertTrue(all(isinstance(v, str) for v in data.values()))
+
+
+class ReadActivityTest(unittest.TestCase):
+    def test_closed_app_is_idle_even_with_session_files(self):
+        root = Path(tempfile.mkdtemp(prefix="pcrc_test_"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "claude").mkdir()
+        (root / "claude" / "s1.json").write_text(
+            '{"state": "WAITING", "ts": %d, "project": "PcRc"}' % int(time.time()), "utf-8")
+        here = {"process_names": [Path(sys.executable).name]}
+        closed = {"process_names": ["pcrc_mai_visto.exe"]}
+
+        self.assertEqual(agent.read_activity("claude", here, root=root), ("WAITING", "PcRc"))
+        self.assertEqual(agent.read_activity("claude", closed, root=root), ("IDLE", None))
 
 
 class StateStartedAtTest(unittest.TestCase):

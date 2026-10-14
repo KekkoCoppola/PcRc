@@ -4,6 +4,9 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $secrets = Join-Path $root 'secrets.json'
 if (-not (Test-Path $secrets)) { throw "Manca $secrets (modello: secrets.example.json)" }
+if (-not (Test-Path (Join-Path $root 'app\android\app\google-services.json'))) {
+    throw 'Manca app\android\app\google-services.json: python tools\firebase_android_app.py'
+}
 
 $flutter = (Get-Command flutter -ErrorAction SilentlyContinue).Source
 if (-not $flutter) { $flutter = Join-Path $env:USERPROFILE 'flutter\bin\flutter.bat' }

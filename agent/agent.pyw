@@ -1,4 +1,5 @@
 import ctypes
+import datetime
 import logging
 import logging.handlers
 import os
@@ -9,7 +10,9 @@ import time
 import warnings
 import psutil
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, db, messaging
+
+import activity
 
 # ================= CONFIGURAZIONE =================
 # Percorso del file JSON scaricato da Firebase
@@ -23,6 +26,9 @@ DATABASE_URL = "https://rcpc-3ed45-default-rtdb.europe-west1.firebasedatabase.ap
 #   running_path_contains: RUNNING solo se l'exe sta in un percorso che contiene
 #                          questo testo (None = basta il nome)
 #   launch:                comando di avvio
+#   display_name:          nome nelle notifiche
+#   activity_stall_s:      solo per le app senza un hook "approvazione richiesta":
+#                          al lavoro senza eventi da tanti secondi = probabilmente in attesa
 APPS_CONFIG = {
     "claude": {
         # claude.exe = app desktop + sessioni Claude Code: STOP le chiude entrambe
@@ -31,11 +37,16 @@ APPS_CONFIG = {
         "running_path_contains": r"\WindowsApps\Claude_",
         # Avvio tramite AppID del pacchetto: non dipende dalla versione installata
         "launch": ["explorer.exe", r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"],
+        "display_name": "Claude",
     },
     "antigravity": {
         "process_names": ["Antigravity.exe"],
         "running_path_contains": None,
         "launch": [r"C:\Users\franc\AppData\Local\Programs\antigravity\Antigravity.exe"],
+        "display_name": "Antigravity",
+        # I comandi lunghi passano in background dopo pochi secondi, quindi un tool
+        # fermo così a lungo è quasi sempre in attesa di approvazione
+        "activity_stall_s": 30,
     },
 }
 
@@ -53,8 +64,14 @@ SHUTDOWN_DELAY_S = 10
 # Silenzio massimo tra due heartbeat perché valga come riavvio del solo agent:
 # oltre, il PC è stato spento e "acceso da" riparte
 RESUME_GAP_S = 30
+# Ogni quanto rimandare al telefono lo stato di lavoro anche se non cambia: la Live
+# Update sul telefono scade da sola se nessuno la rinfresca (messaggio perso, PC spento)
+ACTIVITY_REFRESH_S = 10 * 60
+# Messaggi di stato non consegnati entro così tanto vengono scartati da FCM
+ACTIVITY_MESSAGE_TTL_S = 15 * 60
 # Azioni ammesse per le app (apps/<app>/command) e per il PC (pc/command)
-APP_ACTIONS = ("START", "STOP")
+#   INTERRUPT: ferma il turno dell'agente AI dell'app (tasto Interrompi della Live Update)
+APP_ACTIONS = ("START", "STOP", "INTERRUPT")
 PC_ACTIONS = ("SHUTDOWN",)
 # Nome del mutex che impedisce di avere due agent attivi insieme
 MUTEX_NAME = r"Local\PcRc_agent"
@@ -227,6 +244,64 @@ def command_result(cmd, status, message):
     return {"id": cmd["id"], "action": cmd["action"], "status": status,
             "message": message, "ts": {".sv": "timestamp"}}
 
+def read_activity(key, cfg, root=None):
+    """Stato di lavoro riassuntivo dell'app dagli hook: (stato, progetto).
+
+    Conta ogni processo con quei nomi (anche Claude Code fuori dall'app desktop);
+    ad app chiusa le sessioni rimaste a metà non valgono.
+    """
+    if not find_processes(cfg["process_names"]):
+        return activity.IDLE, None
+    return activity.summarize(key, time.time(), root=root, stall_s=cfg.get("activity_stall_s"))
+
+def should_alert(previous, state):
+    """Il telefono suona: l'agente AI aspetta l'utente o ha finito un turno visto iniziare."""
+    if state == activity.WAITING:
+        return previous != activity.WAITING
+    return state == activity.DONE and previous in (activity.WORKING, activity.WAITING)
+
+def activity_message(key, cfg, state, project, since, alert, now, note=None):
+    """Dati FCM da cui il telefono disegna la Live Update dell'app (FCM vuole solo stringhe).
+
+    guess: per le app senza hook di approvazione l'attesa è una stima.
+    ts: ora d'invio in ms, il telefono scarta i messaggi arrivati in ritardo.
+    note: "interrupted" se il turno l'ha fermato il tasto Interrompi.
+    """
+    data = {
+        "type": "activity", "app": key, "name": cfg.get("display_name") or key,
+        "state": state, "project": project or "", "since": str(since),
+        "alert": "1" if alert else "0",
+        "guess": "1" if cfg.get("activity_stall_s") is not None else "0",
+        "ts": str(int(now * 1000)),
+    }
+    if note:
+        data["note"] = note
+    return data
+
+def interrupt_agent(key):
+    """INTERRUPT: segnale per gli hook, che fermano i turni in corso al passo successivo."""
+    activity.request_interrupt(key)
+    return "OK", "interruzione richiesta, si ferma al prossimo passo"
+
+def send_push(tokens, data, collapse_key):
+    """Messaggio FCM di soli dati ai telefoni registrati: è l'app a disegnare la notifica.
+
+    tokens: {chiave in devices: token FCM}. collapse_key: tra i messaggi non ancora
+    consegnati della stessa app arriva solo l'ultimo.
+    Ritorna le chiavi dei token da eliminare (app disinstallata, token sostituito).
+    """
+    keys = list(tokens)
+    response = messaging.send_each_for_multicast(messaging.MulticastMessage(
+        tokens=[tokens[key] for key in keys],
+        data=data,
+        android=messaging.AndroidConfig(
+            priority="high", collapse_key=collapse_key,
+            ttl=datetime.timedelta(seconds=ACTIVITY_MESSAGE_TTL_S)),
+    ))
+    gone = (messaging.UnregisteredError, messaging.SenderIdMismatchError)
+    return [key for key, sent in zip(keys, response.responses)
+            if not sent.success and isinstance(sent.exception, gone)]
+
 class Agent:
     """Un giro ogni LOOP_INTERVAL_S: legge i comandi, li esegue in background e
     pubblica esiti, stato delle app e heartbeat con una sola scrittura.
@@ -235,7 +310,8 @@ class Agent:
     (SHUTDOWN); l'esito va nel result accanto, con lo stesso id."""
 
     def __init__(self, apps, read_root, write, execute, shutdown=shutdown_pc,
-                 is_running=is_running, first_since=state_started_at, now=time.time):
+                 is_running=is_running, first_since=state_started_at, now=time.time,
+                 activity=read_activity, notify=send_push, interrupt=interrupt_agent):
         self.apps = apps
         self.read_root = read_root      # () -> contenuto della radice del database
         self.write = write              # {percorso: valore} -> update multi-percorso
@@ -251,6 +327,13 @@ class Agent:
         self.first_since = first_since  # (cfg, running) -> inizio dello stato alla prima occhiata
         self.states = {}                # app -> (running, secondi epoch di inizio dello stato)
         self.pc_since = None            # secondi epoch da cui il PC manda heartbeat senza interruzioni
+        self.activity = activity        # (app, cfg) -> (stato di lavoro, progetto)
+        self.notify = notify            # ({chiave: token}, dati, collapse_key) -> chiavi da eliminare
+        self.activities = {}            # app -> (stato di lavoro, secondi epoch di inizio, progetto)
+        self.pushed_at = {}             # app -> secondi epoch dell'ultimo messaggio ai telefoni
+        self.interrupt = interrupt      # (app) -> (status, messaggio): comando INTERRUPT
+        self.interrupted_at = {}        # app -> secondi epoch dell'ultimo INTERRUPT eseguito
+        self.later = queue.Queue()      # (percorso, valore) prodotti dai thread delle notifiche
 
     def tick(self):
         """Un giro di lavoro. Non solleva mai: se Firebase non risponde riprova al giro dopo."""
@@ -259,16 +342,22 @@ class Agent:
             root = root if isinstance(root, dict) else {}
             apps_node = root.get("apps")
             apps_node = apps_node if isinstance(apps_node, dict) else {}
+            devices = root.get("devices")
+            devices = devices if isinstance(devices, dict) else {}
             while not self.finished.empty():
                 path, result = self.finished.get_nowait()
                 self.pending[f"{path}/result"] = result
+            while not self.later.empty():
+                path, value = self.later.get_nowait()
+                self.pending[path] = value
             for key, cfg in self.apps.items():
                 self._dispatch(f"apps/{key}", apps_node.get(key), APP_ACTIONS,
-                               lambda action, cfg=cfg: self.execute(action, cfg))
+                               lambda action, key=key, cfg=cfg: self._app_action(key, cfg, action))
                 running = self.is_running(cfg)
                 self.pending[f"apps/{key}/actual_state"] = "RUNNING" if running else "STOPPED"
                 self.pending[f"apps/{key}/since"] = self._state_since(
                     key, cfg, running, apps_node.get(key))
+                self._publish_activity(key, cfg, devices)
             self._dispatch("pc", root.get("pc"), PC_ACTIONS, lambda action: self.shutdown())
             self.pending["pc_status/since"] = self._online_since(root.get("pc_status"))
             self.pending["pc_status/online"] = True
@@ -322,6 +411,72 @@ class Agent:
         elif previous[0] != running:
             self.states[key] = (running, int(self.now()))
         return self.states[key][1]
+
+    def _publish_activity(self, key, cfg, devices):
+        """Pubblica lo stato di lavoro dell'app e lo manda ai telefoni (Live Update).
+
+        Ai telefoni va a ogni cambio di stato o progetto, al primo giro (per allinearli
+        dopo un riavvio dell'agent) e ogni ACTIVITY_REFRESH_S finché non è IDLE.
+        Suonano solo i cambi scelti da should_alert, mai il primo giro.
+        """
+        try:
+            state, project = self.activity(key, cfg)
+        except Exception:
+            log.exception("%s: stato di lavoro illeggibile", key)
+            return
+        now = self.now()
+        previous = self.activities.get(key)
+        if previous is None or previous[0] != state:
+            self.activities[key] = (state, int(now), project)
+        elif previous[2] != project:
+            self.activities[key] = (state, previous[1], project)
+        since = self.activities[key][1]
+
+        changed = self.activities[key] != previous
+        last_push = self.pushed_at.get(key)
+        stale = (state != activity.IDLE and last_push is not None
+                 and now - last_push >= ACTIVITY_REFRESH_S)
+        if changed or stale:
+            # Turno fermato dal tasto Interrompi: niente suono, lo sa già chi l'ha premuto
+            interrupted = (state == activity.DONE and previous is not None
+                           and previous[0] != activity.DONE
+                           and now - self.interrupted_at.get(key, float("-inf")) <= activity.INTERRUPT_TTL_S)
+            if interrupted:
+                self.interrupted_at.pop(key, None)
+            alert = previous is not None and should_alert(previous[0], state) and not interrupted
+            self._push(devices, activity_message(key, cfg, state, project, since, alert, now,
+                                                 note="interrupted" if interrupted else None), key)
+            self.pushed_at[key] = now
+
+        self.pending[f"apps/{key}/activity"] = state
+        self.pending[f"apps/{key}/activity_since"] = since
+        self.pending[f"apps/{key}/activity_project"] = project
+
+    def _app_action(self, key, cfg, action):
+        """Esegue un comando dell'app nel thread del comando. Ritorna (status, messaggio)."""
+        if action == "INTERRUPT":
+            self.interrupted_at[key] = self.now()
+            return self.interrupt(key)
+        return self.execute(action, cfg)
+
+    def _push(self, devices, data, collapse_key):
+        """Invia il messaggio in background: FCM non deve rallentare l'heartbeat."""
+        tokens = {key: node["token"] for key, node in devices.items()
+                  if isinstance(node, dict) and isinstance(node.get("token"), str)}
+        if tokens:
+            threading.Thread(target=self._send, args=(tokens, data, collapse_key), daemon=True).start()
+
+    def _send(self, tokens, data, collapse_key):
+        label = f"{collapse_key} {data.get('state')}"
+        try:
+            gone = self.notify(tokens, data, collapse_key)
+        except Exception:
+            log.exception("Stato '%s' non inviato ai telefoni", label)
+            return
+        if data.get("alert") == "1":
+            log.info("Avviso '%s' inviato a %d telefoni", label, len(tokens) - len(gone))
+        for key in gone:
+            self.later.put((f"devices/{key}", None))
 
     def _dispatch(self, path, node, actions, run):
         """Prende in carico il comando nuovo del nodo `path`; run(azione) lo esegue."""

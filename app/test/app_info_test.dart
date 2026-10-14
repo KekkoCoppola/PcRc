@@ -39,4 +39,24 @@ void main() {
   test('missing node reads as stopped', () {
     expect(AppInfo.fromJson('claude', null).isRunning, isFalse);
   });
+
+  test('reads what the AI agent is doing, as published by the hooks on the PC', () {
+    final app = AppInfo.fromJson('claude', {
+      'actual_state': 'RUNNING',
+      'activity': 'WAITING',
+      'activity_project': 'PcRc',
+      'activity_since': 1790000000,
+    });
+
+    expect(app.activity, AgentActivity.waiting);
+    expect(app.activityProject, 'PcRc');
+    expect(app.activitySince, 1790000000);
+  });
+
+  test('missing or unknown activity reads as idle', () {
+    expect(AppInfo.fromJson('claude', {'actual_state': 'RUNNING'}).activity, AgentActivity.idle);
+    expect(AppInfo.fromJson('claude', {'activity': 'BOH'}).activity, AgentActivity.idle);
+    expect(AppInfo.fromJson('claude', {'activity': 'DONE'}).activity, AgentActivity.done);
+    expect(AppInfo.fromJson('claude', {'activity': 'WORKING'}).activity, AgentActivity.working);
+  });
 }

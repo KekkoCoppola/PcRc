@@ -15,12 +15,16 @@ $python = Join-Path (Split-Path $pythonw) 'python.exe'
 & $python -m pip install --quiet --disable-pip-version-check -r (Join-Path $agentDir 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'pip install fallito' }
 
-# 2. Ferma gli agent PcRc attivi, anche se avviati da una vecchia cartella (es. RCPC)
+# 2. Hook di Claude Code e Antigravity: scrivono lo stato di lavoro che l'agent pubblica
+& $python (Join-Path $agentDir 'activity.py') --install
+if ($LASTEXITCODE -ne 0) { throw 'registrazione degli hook fallita' }
+
+# 3. Ferma gli agent PcRc attivi, anche se avviati da una vecchia cartella (es. RCPC)
 Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
     Where-Object { $_.CommandLine -match 'agent\.pyw' -and $_.CommandLine -match 'PcRc|RCPC' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force; "Agent fermato (PID $($_.ProcessId))" }
 
-# 3. Avvio automatico all'accesso: un solo collegamento, verso questa cartella
+# 4. Avvio automatico all'accesso: un solo collegamento, verso questa cartella
 $startup = [Environment]::GetFolderPath('Startup')
 $old = Join-Path $startup 'agent.pyw - collegamento.lnk'
 if (Test-Path $old) {
@@ -36,6 +40,6 @@ $shortcut.Description = 'PcRc: agent per il controllo remoto del PC'
 $shortcut.Save()
 "Avvio automatico: $lnk"
 
-# 4. Avvio adesso
+# 5. Avvio adesso
 Start-Process $pythonw -ArgumentList "`"$agent`"" -WorkingDirectory $agentDir
 "Agent avviato da $agentDir (log: agent\agent.log)"

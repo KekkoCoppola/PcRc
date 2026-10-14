@@ -37,6 +37,31 @@ void main() {
       expect(body['ts'], {'.sv': 'timestamp'});
     });
 
+    test('phone registers its push token where the agent looks for it', () async {
+      late http.Request sent;
+      final service = serviceReplying((request) async {
+        sent = request;
+        return http.Response(request.body, 200);
+      });
+
+      final ok = await service.registerDevice('abc:APA91b-x_y');
+
+      expect(ok, isTrue);
+      expect(sent.method, 'PUT');
+      expect(sent.url.toString(), 'https://db.example/devices/abc:APA91b-x_y.json');
+      expect(jsonDecode(sent.body), {
+        'token': 'abc:APA91b-x_y',
+        'platform': 'android',
+        'ts': {'.sv': 'timestamp'},
+      });
+    });
+
+    test('push token registration reports failures', () async {
+      final service = serviceReplying((request) async => http.Response('no', 401));
+
+      expect(await service.registerDevice('t'), isFalse);
+    });
+
     test('PC command goes to pc/command', () async {
       late http.Request sent;
       final service = serviceReplying((request) async {

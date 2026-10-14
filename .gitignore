@@ -1,6 +1,8 @@
 # Segreti: mai nel repo (modelli in secrets.example.json)
 secrets.json
 firebase_key.json
+# Configurazione Firebase dell'app Android (tools/firebase_android_app.py)
+google-services.json
 
 # Python
 __pycache__/

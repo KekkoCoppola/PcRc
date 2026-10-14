@@ -16,6 +16,8 @@ void main() {
     bool online = true,
     bool busy = false,
     VoidCallback? onToggle,
+    AgentActivity activity = AgentActivity.idle,
+    String? project,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -23,7 +25,13 @@ void main() {
           padding: const EdgeInsets.all(20),
           child: AppCard(
             app: managedApp('claude'),
-            info: AppInfo(key: 'claude', actualState: state, since: fiveMinutesAgo),
+            info: AppInfo(
+              key: 'claude',
+              actualState: state,
+              since: fiveMinutesAgo,
+              activity: activity,
+              activityProject: project,
+            ),
             online: online,
             busy: busy,
             onToggle: onToggle ?? () {},
@@ -72,6 +80,30 @@ void main() {
 
     expect(toggles, 0);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  });
+
+  testWidgets('running app shows what its AI agent is doing', (tester) async {
+    await pumpCard(tester, state: 'RUNNING', activity: AgentActivity.waiting, project: 'PcRc');
+    expect(find.text('Aspetta te · PcRc'), findsOneWidget);
+
+    await pumpCard(tester, state: 'RUNNING', activity: AgentActivity.working);
+    expect(find.text('Sta lavorando'), findsOneWidget);
+
+    await pumpCard(tester, state: 'RUNNING', activity: AgentActivity.done, project: 'PcRc');
+    expect(find.text('Ha finito · PcRc'), findsOneWidget);
+  });
+
+  testWidgets('Claude Code in a terminal works with the desktop app closed', (tester) async {
+    await pumpCard(tester, state: 'STOPPED', activity: AgentActivity.working);
+    expect(find.text('Sta lavorando'), findsOneWidget);
+  });
+
+  testWidgets('no activity line when the agent is idle or the PC away', (tester) async {
+    await pumpCard(tester, state: 'RUNNING', activity: AgentActivity.idle);
+    expect(find.byKey(const ValueKey('activity')), findsNothing);
+
+    await pumpCard(tester, state: 'RUNNING', activity: AgentActivity.working, online: false);
+    expect(find.byKey(const ValueKey('activity')), findsNothing);
   });
 
   testWidgets('PC not reachable: no elapsed time, switch disabled', (tester) async {
